@@ -1,0 +1,51 @@
+build/
+cmake-build-*/
+
+*.o
+*.a
+*.so
+
+.vscode/
+.idea/
+
+*.img
+*.dd
+*.raw
+*.iso
+
+recovered/
+recovery_output/
+
+*.log
+
+.env
+.env.*
+.aider*
+build-rel/
+
+# Evidence directories produced by running the tool.
+evidence/
+
+# ...but the audit logs ARE deliverables and are tracked.
+!audit-logs/
+!audit-logs/*.log
+
+# A photorec session file is written by running photorec and is not source.
+photorec.se2
+recup_dir*/
+
+# NIST publications are freely downloadable and not ours to vendor.
+NIST.SP.800-88r2*.pdf
+
+/cstuff/
+/build/
+/build-rel/
+/reports/
+/samples/
+/tests/*.img
+/tests/*.raw
+/tests/*.dd
+/tests/*.iso
+/tests/*.qcow2
+/tests/*.vdi
+/tests/*.vmdk
