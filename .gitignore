@@ -23,18 +23,14 @@ recovery_output/
 .aider*
 build-rel/
 
-# Evidence directories produced by running the tool.
-evidence/
 
-# ...but the audit logs ARE deliverables and are tracked.
+evidence/
 !audit-logs/
 !audit-logs/*.log
 
-# A photorec session file is written by running photorec and is not source.
 photorec.se2
 recup_dir*/
 
-# NIST publications are freely downloadable and not ours to vendor.
 NIST.SP.800-88r2*.pdf
 
 /cstuff/
