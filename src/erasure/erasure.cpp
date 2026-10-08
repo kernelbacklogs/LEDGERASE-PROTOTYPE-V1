@@ -16,13 +16,13 @@
 //
 //  3. The filesystem's row decides whether the file may be erased at all, and a
 //     refusal is a refusal, not a partial success. See
-//     src/filesystem/filesystem_capability.cpp and docs/FILESYSTEMS.md.
+//     src/device/filesystem_capability.cpp and docs/FILESYSTEMS.md.
 
 #include "ledgerase/erasure.hpp"
-#include "ledgerase/platform/linux.hpp"
+#include "platform/linux/linux.hpp"
 #include "ledgerase/target.hpp"
 
-#include "../audit/evidence_document.hpp"
+#include "evidence/audit/evidence_document.hpp"
 
 #include <algorithm>
 #include <cerrno>

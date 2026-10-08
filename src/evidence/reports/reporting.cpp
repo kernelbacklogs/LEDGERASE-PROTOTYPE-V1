@@ -3,7 +3,6 @@
 #include <iostream>
 #include <iterator>
 #include <sstream>
-#include "ledgerase/cli.hpp"
 #include "ledgerase/types.hpp"
 #include "ledgerase/error.hpp"
 #include "ledgerase/json_adapters.hpp"

@@ -3,6 +3,8 @@
 #include "ledgerase/types.hpp"
 #include "ledgerase/error.hpp"
 #include "ledgerase/evidence.hpp"
+#include "ledgerase/limitations.hpp"
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -74,6 +76,51 @@ public:
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl_;
+};
+
+class OutputFormatter {
+public:
+    OutputFormatter();
+    ~OutputFormatter();
+
+    void setJsonOutput(bool enabled);
+    void setVerbose(bool enabled);
+
+    // Typed writers. There is deliberately no generic output<T>(): every
+    // consumer needs domain-specific formatting, and a catch-all writer would
+    // silently lose fields.
+    Result<void> outputDeviceList(const std::vector<DeviceInfo>& devices);
+    Result<void> outputDeviceInfo(const DeviceInfo& device);
+    Result<void> outputCapabilityInfo(const CapabilityInfo& capabilities);
+    Result<void> outputPlan(const SanitizationPlan& plan);
+    Result<void> outputJobStatus(const JobStatus& status);
+    Result<void> outputVerificationReport(const VerificationReport& report);
+    Result<void> outputValidationReport(const ValidationReport& report);
+    Result<void> outputAuditRecord(const AuditRecord& record);
+    Result<void> outputError(const SanitizerError& error);
+    Result<void> outputMessage(const std::string& message);
+    Result<void> outputWarning(const std::string& message);
+
+    // The terminal limitation view: grouped under at most four headings and
+    // capped at a few lines, with a pointer to the evidence file for the full
+    // list. Under --verbose the full list is printed here instead, with IDs,
+    // and it is not printed again at the end of the run.
+    //
+    // `evidencePath` is the file the full list is in. `alreadyPrinted` tells
+    // the caller whether the full list has already gone to the terminal, so
+    // the same list is never shown twice in one run.
+    Result<void> outputLimitations(const LimitationSet& limitations,
+                                   const std::string& evidencePath);
+    bool fullLimitationListPrinted() const;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> pImpl_;
+    bool jsonOutput_ = false;
+    bool verbose_ = false;
+    // Set once the full limitation list has gone to the terminal, so the
+    // end-of-run summary does not print it a second time.
+    bool fullListPrinted_ = false;
 };
 
 } // namespace ledgerase

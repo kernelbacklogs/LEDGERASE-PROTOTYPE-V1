@@ -24,9 +24,8 @@
 #include "ledgerase/capability.hpp"
 #include "ledgerase/types.hpp"
 #include "ledgerase/error.hpp"
-#include "ledgerase/platform/linux.hpp"
+#include "platform/linux/linux.hpp"
 #include "ledgerase/reporting.hpp"
-#include "ledgerase/cli.hpp"
 
 #include <cstdio>
 #include <filesystem>

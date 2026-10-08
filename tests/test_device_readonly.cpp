@@ -24,7 +24,7 @@
 // point a device path that cannot be opened at them, which reproduces the bug
 // exactly: the ioctl path fails and the sysfs path answers.
 
-#include "ledgerase/platform/linux.hpp"
+#include "platform/linux/linux.hpp"
 #include "ledgerase/safety.hpp"
 
 #include <cstdio>

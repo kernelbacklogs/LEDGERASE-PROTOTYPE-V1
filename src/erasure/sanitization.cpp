@@ -1,8 +1,8 @@
 #include "ledgerase/sanitization.hpp"
-#include "ledgerase/progress_reporter.hpp"
+#include "evidence/reports/progress_reporter.hpp"
 #include "ledgerase/policy.hpp"
 #include "ledgerase/verification.hpp"
-#include "ledgerase/platform/linux.hpp"
+#include "platform/linux/linux.hpp"
 #include <chrono>
 #include <thread>
 #include <random>

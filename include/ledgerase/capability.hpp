@@ -2,8 +2,9 @@
 
 #include "ledgerase/types.hpp"
 #include "ledgerase/error.hpp"
-#include "ledgerase/platform/linux.hpp"
+#include <memory>
 #include <string>
+#include <vector>
 
 namespace ledgerase {
 

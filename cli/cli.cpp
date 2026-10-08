@@ -1,5 +1,5 @@
-#include "ledgerase/cli.hpp"
-#include "ledgerase/progress_reporter.hpp"
+#include "cli.hpp"
+#include "evidence/reports/progress_reporter.hpp"
 #include "ledgerase/device.hpp"
 #include "ledgerase/capability.hpp"
 #include "ledgerase/safety.hpp"
@@ -7,7 +7,9 @@
 #include "ledgerase/sanitization.hpp"
 #include "ledgerase/verification.hpp"
 #include "ledgerase/reporting.hpp"
-#include "ledgerase/mock.hpp"
+#include "ledgerase/filesystem_capability.hpp"
+#include "ledgerase/operator.hpp"
+#include "mock/mock.hpp"
 #include "ledgerase/json_adapters.hpp"
 #include "ledgerase/ledgerase.hpp"
 #include <iostream>
@@ -1248,7 +1250,7 @@ void CliApplication::printUsage() {
 // caller reports as "not searched" rather than as "nothing found".
 std::string mediumForPath(const std::string& path, std::string& why) {
     why.clear();
-    const std::string type = platform::linux::filesystemTypeOf(path);
+    const std::string type = reportedFilesystemName(path);
     if (type.empty()) {
         why = "the kernel reported no filesystem for the path";
         return {};
@@ -1508,7 +1510,7 @@ Result<void> CliApplication::eraseFileOrFolder(const CliOptions& options) {
     inputs.targetKind = folder ? "folder" : "file";
     inputs.simulated = options.simulationMode;
     inputs.options = eraseOptions;
-    inputs.filesystemName = platform::linux::filesystemTypeOf(options.devicePath);
+    inputs.filesystemName = reportedFilesystemName(options.devicePath);
 
     const std::string evidencePath =
         options.evidenceFile.empty()
@@ -1596,7 +1598,7 @@ Result<void> CliApplication::eraseFileOrFolder(const CliOptions& options) {
         }
         inputs.residualSearchTarget = medium;
         const std::vector<std::string> swaps =
-            platform::linux::getActiveSwapDevices();
+            SafetyManager::getActiveSwapDevices();
 
         // The residual search is mandatory unless it is explicitly waived, and
         // the waiver is loud in the output and recorded in the evidence. This is

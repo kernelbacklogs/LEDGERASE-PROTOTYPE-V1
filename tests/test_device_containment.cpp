@@ -21,7 +21,7 @@
 //
 // No real device is opened. This is a pure string test.
 
-#include "ledgerase/platform/linux.hpp"
+#include "platform/linux/linux.hpp"
 #include "ledgerase/safety.hpp"
 
 #include <cstdio>

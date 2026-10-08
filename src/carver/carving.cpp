@@ -10,7 +10,7 @@
 #include <unistd.h>
 
 #include "ledgerase/evidence.hpp"
-#include "ledgerase/platform/linux.hpp"
+#include "platform/linux/linux.hpp"
 
 namespace ledgerase {
 

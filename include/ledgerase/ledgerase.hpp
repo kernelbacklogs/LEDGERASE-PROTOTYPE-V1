@@ -9,9 +9,6 @@
 #include "ledgerase/sanitization.hpp"
 #include "ledgerase/verification.hpp"
 #include "ledgerase/reporting.hpp"
-#include "ledgerase/mock.hpp"
-#include "ledgerase/cli.hpp"
-#include "ledgerase/platform/linux.hpp"
 
 #define LEDGERASE_VERSION "1.0.0"
 #define LEDGERASE_VERSION_MAJOR 1

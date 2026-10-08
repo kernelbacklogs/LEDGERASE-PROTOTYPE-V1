@@ -98,21 +98,33 @@ endif()
 
 add_subdirectory(src)
 
+if(BUILD_CLI)
+    add_subdirectory(cli)
+endif()
+
+if(BUILD_GUI)
+    add_subdirectory(gui)
+endif()
+
 if(BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
 
-install(TARGETS ledgerase-core ledgerase-cli
+install(TARGETS ledgerase-core
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
 )
 
-if(BUILD_GUI)
-    install(TARGETS ledgerase-gui
-        RUNTIME DESTINATION bin
-    )
+# The applications are optional (BUILD_CLI / BUILD_GUI), so install each only
+# when its target exists.
+if(TARGET ledgerase-cli)
+    install(TARGETS ledgerase-cli RUNTIME DESTINATION bin)
+endif()
+
+if(TARGET ledgerase-gui)
+    install(TARGETS ledgerase-gui RUNTIME DESTINATION bin)
 endif()
 
 install(DIRECTORY include/ DESTINATION include)

@@ -8,7 +8,7 @@
 
 #include "ledgerase/sanitization.hpp"
 #include "ledgerase/limitations.hpp"
-#include "ledgerase/mock.hpp"
+#include "mock/mock.hpp"
 #include "ledgerase/json_adapters.hpp"
 
 #include <cstdio>

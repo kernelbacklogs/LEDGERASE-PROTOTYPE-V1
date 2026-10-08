@@ -2,7 +2,7 @@
 #include "ledgerase/device.hpp"
 #include "ledgerase/types.hpp"
 #include "ledgerase/sanitization.hpp"
-#include "ledgerase/platform/linux.hpp"
+#include "platform/linux/linux.hpp"
 #include <sstream>
 #include <iomanip>
 #include <algorithm>

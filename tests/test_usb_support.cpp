@@ -17,13 +17,13 @@
 // Nothing here opens a real device. The read-back is exercised against a
 // temporary file, which is the same code path the verifier uses for a device.
 
-#include "ledgerase/mock.hpp"
+#include "mock/mock.hpp"
 #include "ledgerase/policy.hpp"
 #include "ledgerase/sanitization.hpp"
 #include "ledgerase/verification.hpp"
 #include "ledgerase/capability.hpp"
 #include "ledgerase/evidence.hpp"
-#include "ledgerase/platform/linux.hpp"
+#include "platform/linux/linux.hpp"
 #include "ledgerase/types.hpp"
 #include "ledgerase/error.hpp"
 

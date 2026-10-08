@@ -25,6 +25,8 @@ build-rel/
 
 
 evidence/
+# The runtime evidence directory above is ignored; the source module is not.
+!/src/evidence/
 !audit-logs/
 !audit-logs/*.log
 

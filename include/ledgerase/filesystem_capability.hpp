@@ -128,6 +128,13 @@ FilesystemKind filesystemKindFromName(const std::string& reportedName);
 // filesystem that would have been convenient.
 FilesystemCapabilities detectFilesystem(const std::string& path);
 
+// The filesystem name the platform reports for a path (for example "ext4"), or
+// an empty string when the platform reports nothing. This is the same name
+// detectFilesystem() records in `reportedName`; it is exposed on its own so a
+// caller that needs only the name does not have to reach into the platform
+// layer, which is not part of the public API.
+std::string reportedFilesystemName(const std::string& path);
+
 // Whether this tool will erase a file on this filesystem at all.
 //
 // The filesystem's OVERWRITE_CONTENT cell describes the *residue* a file-level
