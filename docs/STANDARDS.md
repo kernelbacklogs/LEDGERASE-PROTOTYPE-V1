@@ -99,8 +99,11 @@ collapsing them is how a completed overwrite gets reported as a completed
 ### One record, always produced
 
 There is exactly one record per sanitization: the evidence bundle. It is written
-to `./evidence/<job-id>.json` by default, and `--evidence` overrides the
-location, not whether a record is made. Recording is not opt-in, and the run
+to `<evidence dir>/audit/<job-id>.json` by default, and `--evidence` overrides
+the location, not whether a record is made. Reports rendered from a bundle (for
+example a PDF certificate) are kept apart in `<evidence dir>/reports/`; they
+state the bundle's canonical hash and are never read back as a record. Bundles
+written before the split, directly in the evidence directory, are still found. Recording is not opt-in, and the run
 aborts before touching the media if the path cannot be written.
 
 An earlier version carried a second, volatile operational log in `mlock`ed RAM

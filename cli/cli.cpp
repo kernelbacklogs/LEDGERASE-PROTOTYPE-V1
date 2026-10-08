@@ -40,7 +40,12 @@ namespace {
 // left alone: the operator chose it, and silently changing the permissions of a
 // directory they already own would be a worse surprise than a permissive mode
 // they set deliberately.
-Result<void> ensureEvidenceDirectory(const std::string& evidencePath) {
+Result<void> ensureEvidenceDirectory(
+    const std::string& evidencePath,
+    const std::string& advice =
+        "Choose a writable location with --evidence <path>, or create the "
+        "directory first. Every job must produce a record, so the run is "
+        "refused rather than proceeding unrecorded.") {
     const std::size_t slash = evidencePath.find_last_of('/');
     const std::string targetDir =
         slash == std::string::npos ? std::string(".") : evidencePath.substr(0, slash);
@@ -49,17 +54,31 @@ Result<void> ensureEvidenceDirectory(const std::string& evidencePath) {
     if (std::filesystem::exists(targetDir, ec)) {
         return Result<void>::success();
     }
+
+    // audit/ and reports/ live inside the evidence directory. When this run is
+    // the one creating that parent as well, it is restricted the same way, so
+    // the split does not leave a world-readable directory above a private one.
+    const std::filesystem::path target{targetDir};
+    const std::string leaf = target.filename().string();
+    const bool isStoreDirectory =
+        leaf == kAuditSubdirectory || leaf == kReportsSubdirectory;
+    const std::filesystem::path parent = target.parent_path();
+    const bool parentIsNew =
+        isStoreDirectory && !parent.empty() && !std::filesystem::exists(parent, ec);
+
     std::filesystem::create_directories(targetDir, ec);
     if (ec) {
         return Result<void>::err(
             ErrorCode::IO_ERROR,
             "Cannot create the evidence directory " + targetDir + ": " + ec.message(),
-            "Choose a writable location with --evidence <path>, or create the "
-            "directory first. Every job must produce a record, so the run is "
-            "refused rather than proceeding unrecorded.");
+            advice);
     }
     std::filesystem::permissions(targetDir, std::filesystem::perms::owner_all,
                                  std::filesystem::perm_options::replace, ec);
+    if (!ec && parentIsNew) {
+        std::filesystem::permissions(parent, std::filesystem::perms::owner_all,
+                                     std::filesystem::perm_options::replace, ec);
+    }
     if (ec) {
         return Result<void>::err(
             ErrorCode::IO_ERROR,
@@ -67,6 +86,13 @@ Result<void> ensureEvidenceDirectory(const std::string& evidencePath) {
             "Choose a location where the evidence can be kept private");
     }
     return Result<void>::success();
+}
+
+// Bundles written before audit/ and reports/ were separated sit directly in the
+// evidence directory. They stay readable: moving the layout must not make an
+// existing record set appear to be gone. Nothing is ever written here.
+std::string legacyEvidencePath(const std::string& jobId, const std::string& directory) {
+    return directory + "/" + jobId + ".json";
 }
 
 std::string currentOperator() {
@@ -375,10 +401,12 @@ public:
         if (!explicitPath.empty()) {
             candidates.push_back(explicitPath);
         } else {
-            candidates.push_back(CliApplication::defaultEvidencePath(
-                jobId, evidenceDirectory));
-            candidates.push_back(CliApplication::defaultEvidencePath(
-                jobId, defaultEvidenceDirectory()));
+            for (const std::string& directory :
+                 {evidenceDirectory, defaultEvidenceDirectory()}) {
+                candidates.push_back(
+                    CliApplication::defaultEvidencePath(jobId, directory));
+                candidates.push_back(legacyEvidencePath(jobId, directory));
+            }
         }
 
         std::string firstMissing;
@@ -409,10 +437,10 @@ public:
     // directory rather than by remembering what happened in RAM.
     Result<std::vector<std::string>> listBundlePaths() const {
         std::vector<std::string> paths;
-        for (const auto& directory : {evidenceDirectory, defaultEvidenceDirectory()}) {
+        const auto collect = [&paths](const std::filesystem::path& directory) {
             std::error_code ec;
             if (!std::filesystem::is_directory(directory, ec)) {
-                continue;
+                return;
             }
             for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {
                 if (!entry.is_regular_file()) continue;
@@ -422,6 +450,10 @@ public:
                     paths.push_back(path);
                 }
             }
+        };
+        for (const auto& directory : {evidenceDirectory, defaultEvidenceDirectory()}) {
+            collect(std::filesystem::path(directory) / kAuditSubdirectory);
+            collect(directory);  // bundles from before the audit/ split
             if (!paths.empty()) break;
         }
         std::sort(paths.begin(), paths.end());
@@ -612,7 +644,13 @@ std::string defaultEvidenceDirectory() {
 
 std::string CliApplication::defaultEvidencePath(const std::string& jobId,
                                                 const std::string& directory) {
-    return directory + "/" + jobId + ".json";
+    return directory + "/" + kAuditSubdirectory + "/" + jobId + ".json";
+}
+
+std::string CliApplication::defaultReportPath(const std::string& jobId,
+                                              const std::string& directory,
+                                              const std::string& extension) {
+    return directory + "/" + kReportsSubdirectory + "/" + jobId + "." + extension;
 }
 
 int CliApplication::run(int argc, char* argv[]) {
@@ -1194,7 +1232,7 @@ void CliApplication::printUsage() {
     std::cout << "Evidence:\n";
     std::cout << "  Every sanitization writes exactly one evidence bundle. It is durable,\n";
     std::cout << "  hash-chained, and third-party verifiable. The default path is\n";
-    std::cout << "  " << defaultEvidenceDirectory() << "/<job-id>.json,\n";
+    std::cout << "  " << defaultEvidenceDirectory() << "/audit/<job-id>.json,\n";
     std::cout << "  which is absolute. It resolves, in order, from\n";
     std::cout << "  $LEDGERASE_EVIDENCE_DIR,\n";
     std::cout << "  /var/lib/ledgerase/evidence as root,\n";
@@ -1211,6 +1249,11 @@ void CliApplication::printUsage() {
     std::cout << "  There is no other log. An earlier version kept one in RAM behind\n";
     std::cout << "  'ret-log' and 'give-log'; both were removed because a record that\n";
     std::cout << "  disappears with the process is not an audit trail.\n";
+    std::cout << "  Bundles are kept in audit/ and rendered reports in reports/ (a PDF\n";
+    std::cout << "  report with no --output goes to reports/<job-id>.pdf). A report is\n";
+    std::cout << "  made from a bundle and states its hash; only audit/ is a record.\n";
+    std::cout << "  Bundles written before this split, directly in the directory, are\n";
+    std::cout << "  still found.\n";
     std::cout << "  Limitations:\n";
     std::cout << "  Every limitation has a stable ID and one sentence. The terminal shows\n";
     std::cout << "  them grouped under four headings; the evidence file holds the full\n";
@@ -1230,7 +1273,7 @@ void CliApplication::printUsage() {
     std::cout << "  ledgerase-cli audit\n";
     std::cout << "  ledgerase-cli evidence JOB-ID\n";
     std::cout << "  ledgerase-cli verify-log " << defaultEvidenceDirectory()
-              << "/JOB-ID.json\n";
+              << "/audit/JOB-ID.json\n";
     std::cout << "  ledgerase-cli sanitize /dev/sdX --simulation --force\n";
 }
 
@@ -2130,7 +2173,7 @@ Result<void> CliApplication::carve(const CliOptions& options) {
 int CliApplication::runShell() {
     std::cout << "Ledgerase interactive session\n";
     std::cout << "Every job writes its evidence bundle to ./" << kDefaultEvidenceDirectory
-              << "/<job-id>.json\n";
+              << "/audit/<job-id>.json\n";
     std::cout << "as it finishes, so nothing is lost when this session ends.\n";
     std::cout << "Type 'audit' to list the records, 'evidence <job-id>' to read one,\n";
     std::cout << "'help' for the command list, 'quit' to end the session.\n\n";
@@ -2921,7 +2964,7 @@ Result<void> CliApplication::sanitize(const CliOptions& options) {
     // Written for every sanitization event. This is not optional and cannot be
     // switched off: the bundle is the only system of record this tool has, so a
     // sanitization that produced no bundle would be an unevidenced,
-    // untraceable event. The default path is ./evidence/<job-id>.json and
+    // untraceable event. The default path is <evidence dir>/audit/<job-id>.json and
     // --evidence overrides where it goes, not whether it happens.
     auto bundle = pImpl_->buildEvidence(record, options, safetyReport);
     if (bundle.isError()) {
@@ -3194,17 +3237,27 @@ Result<void> CliApplication::showReport(const CliOptions& options) {
     }
 
     if (format == "pdf") {
-        if (options.outputFile.empty()) {
-            return Result<void>::err(ErrorCode::INVALID_ARGUMENT,
-                                     "--output is required for PDF reports",
-                                     "Usage: ledgerase-cli report <job-id> --format pdf "
-                                     "--output <file.pdf>");
+        // With no --output the report goes to <evidence dir>/reports/. It is
+        // rendered from the bundle read above and states that bundle's
+        // canonical hash; it is not a second record.
+        const bool defaultDestination = options.outputFile.empty();
+        const std::string outputPath =
+            defaultDestination
+                ? CliApplication::defaultReportPath(options.jobId,
+                                                    pImpl_->evidenceDirectory, "pdf")
+                : options.outputFile;
+        if (defaultDestination) {
+            const auto made = ensureEvidenceDirectory(
+                outputPath, "Choose a writable location with --output <file.pdf>.");
+            if (made.isError()) {
+                return made;
+            }
         }
-        auto written = generator.writeEvidencePdf(bundle.value(), options.outputFile);
+        auto written = generator.writeEvidencePdf(bundle.value(), outputPath);
         if (written.isError()) {
             return Result<void>::err(written.error());
         }
-        std::cout << "Report written to " << options.outputFile << "\n";
+        std::cout << "Report written to " << outputPath << "\n";
         return Result<void>::success();
     }
 

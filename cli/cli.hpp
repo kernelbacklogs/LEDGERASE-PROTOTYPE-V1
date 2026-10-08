@@ -37,6 +37,14 @@ constexpr const char* kDefaultEvidenceDirectory = "evidence";
 // found again.
 std::string defaultEvidenceDirectory();
 
+// Inside the evidence directory, the two kinds of output are kept apart:
+//   <dir>/audit/    the evidence bundles - the system of record
+//   <dir>/reports/  renderings of a bundle (for example a PDF certificate)
+// A report is derived from a bundle and carries that bundle's canonical hash.
+// It is never read back as a record; only audit/ is.
+constexpr const char* kAuditSubdirectory = "audit";
+constexpr const char* kReportsSubdirectory = "reports";
+
 struct CliOptions {
     std::string command;
     std::string devicePath;
@@ -203,9 +211,15 @@ public:
     // Writes the command summary to stdout.
     static void printUsage();
 
-    // Default evidence path for a job: <evidence dir>/<job id>.json
+    // Default evidence path for a job: <evidence dir>/audit/<job id>.json
     static std::string defaultEvidencePath(const std::string& jobId,
                                            const std::string& directory);
+
+    // Default destination for a rendered report:
+    // <evidence dir>/reports/<job id>.<extension>
+    static std::string defaultReportPath(const std::string& jobId,
+                                         const std::string& directory,
+                                         const std::string& extension);
 
 private:
     class Impl;

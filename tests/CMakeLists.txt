@@ -152,6 +152,15 @@ if(TARGET ledgerase-cli)
         ${CMAKE_SOURCE_DIR}/include
     )
     add_test(NAME test_config_enforcement COMMAND test_config_enforcement)
+
+    # Runtime layout of the evidence directory: bundles in audit/, rendered
+    # reports in reports/, reports never read back as records.
+    add_executable(test_evidence_layout test_evidence_layout.cpp)
+    target_compile_definitions(test_evidence_layout PRIVATE
+        LEDGERASE_CLI_PATH="$<TARGET_FILE:ledgerase-cli>"
+    )
+    add_dependencies(test_evidence_layout ledgerase-cli)
+    add_test(NAME test_evidence_layout COMMAND test_evidence_layout)
 endif()
 
 # The local assurance policy: a judgement encoded as a function. What matters is
