@@ -1,5 +1,10 @@
 # Tests CMakeLists.txt
 
+# Several tests exercise internals directly (the Linux platform layer, the mock
+# backend, the progress reporter), so src/ is on their include path. Those
+# headers are not part of the public include/ tree.
+include_directories(${CMAKE_SOURCE_DIR}/src)
+
 # Execution status semantics: a failed sanitization must never be reported as
 # a success, and simulation must not reach the real device methods.
 add_executable(test_execution_status test_execution_status.cpp)
@@ -135,16 +140,28 @@ add_test(NAME test_file_erasure COMMAND test_file_erasure)
 # changing behaviour when it is changed. The cap, the search bound, the pass
 # count, the category filter and --identity-confirmed all failed this in one form
 # or another.
-add_executable(test_config_enforcement test_config_enforcement.cpp)
-target_link_libraries(test_config_enforcement PRIVATE ledgerase-core)
-target_compile_definitions(test_config_enforcement PRIVATE
-    LEDGERASE_CLI_PATH="$<TARGET_FILE:ledgerase-cli>"
-)
-add_dependencies(test_config_enforcement ledgerase-cli)
-target_include_directories(test_config_enforcement PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-)
-add_test(NAME test_config_enforcement COMMAND test_config_enforcement)
+# Runs the real CLI binary, so it exists only when BUILD_CLI=ON.
+if(TARGET ledgerase-cli)
+    add_executable(test_config_enforcement test_config_enforcement.cpp)
+    target_link_libraries(test_config_enforcement PRIVATE ledgerase-core)
+    target_compile_definitions(test_config_enforcement PRIVATE
+        LEDGERASE_CLI_PATH="$<TARGET_FILE:ledgerase-cli>"
+    )
+    add_dependencies(test_config_enforcement ledgerase-cli)
+    target_include_directories(test_config_enforcement PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+    )
+    add_test(NAME test_config_enforcement COMMAND test_config_enforcement)
+
+    # Runtime layout of the evidence directory: bundles in audit/, rendered
+    # reports in reports/, reports never read back as records.
+    add_executable(test_evidence_layout test_evidence_layout.cpp)
+    target_compile_definitions(test_evidence_layout PRIVATE
+        LEDGERASE_CLI_PATH="$<TARGET_FILE:ledgerase-cli>"
+    )
+    add_dependencies(test_evidence_layout ledgerase-cli)
+    add_test(NAME test_evidence_layout COMMAND test_evidence_layout)
+endif()
 
 # The local assurance policy: a judgement encoded as a function. What matters is
 # not that it returns a level but that it is total, that it declines to decide on

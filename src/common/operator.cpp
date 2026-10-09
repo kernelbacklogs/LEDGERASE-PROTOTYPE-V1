@@ -14,7 +14,7 @@
 // ask about the job. It proves nothing on its own and is not treated as if it
 // did.
 
-#include "ledgerase/cli.hpp"
+#include "ledgerase/operator.hpp"
 
 #include <cstdlib>
 #include <pwd.h>

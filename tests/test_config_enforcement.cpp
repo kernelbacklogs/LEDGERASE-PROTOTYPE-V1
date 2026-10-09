@@ -11,10 +11,9 @@
 // named limit in the tree, not from a hunch.
 
 #include "ledgerase/carving.hpp"
-#include "ledgerase/cli.hpp"
 #include "ledgerase/erasure.hpp"
 #include "ledgerase/filesystem_capability.hpp"
-#include "ledgerase/progress_reporter.hpp"
+#include "evidence/reports/progress_reporter.hpp"
 #include "ledgerase/sanitization.hpp"
 
 #include <cstdio>

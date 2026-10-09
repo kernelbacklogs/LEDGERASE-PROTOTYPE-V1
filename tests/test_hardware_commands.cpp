@@ -26,7 +26,7 @@
 // The one thing these tests must not do is read or write a real block device.
 // Nothing here opens /dev/*.
 
-#include "ledgerase/platform/linux.hpp"
+#include "platform/linux/linux.hpp"
 #include "ledgerase/policy.hpp"
 #include "ledgerase/sanitization.hpp"
 #include "ledgerase/types.hpp"

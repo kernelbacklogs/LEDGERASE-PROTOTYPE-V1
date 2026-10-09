@@ -1,4 +1,4 @@
-#include "ledgerase/progress_reporter.hpp"
+#include "progress_reporter.hpp"
 
 #include <algorithm>
 #include <cmath>

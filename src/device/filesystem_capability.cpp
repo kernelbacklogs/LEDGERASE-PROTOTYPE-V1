@@ -11,7 +11,7 @@
 // says that too, rather than borrowing authority from a document.
 
 #include "ledgerase/filesystem_capability.hpp"
-#include "ledgerase/platform/linux.hpp"
+#include "platform/linux/linux.hpp"
 
 #include <sys/statfs.h>
 #include <sys/vfs.h>
@@ -407,6 +407,10 @@ FilesystemCapability FilesystemCapabilities::capability(
     }
     return {operation, SupportLevel::UNKNOWN,
             "this build's matrix has no row for this operation"};
+}
+
+std::string reportedFilesystemName(const std::string& path) {
+    return platform::linux::filesystemTypeOf(path);
 }
 
 FilesystemCapabilities detectFilesystem(const std::string& path) {

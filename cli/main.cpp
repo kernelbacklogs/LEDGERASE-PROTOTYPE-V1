@@ -1,4 +1,4 @@
-#include "ledgerase/cli.hpp"
+#include "cli.hpp"
 #include "ledgerase/ledgerase.hpp"
 #include <iostream>
 

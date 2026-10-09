@@ -37,21 +37,13 @@ constexpr const char* kDefaultEvidenceDirectory = "evidence";
 // found again.
 std::string defaultEvidenceDirectory();
 
-// Who ran the job, and who the process ran as. Under sudo these differ, and
-// the difference is what a certificate has to record: "root" names no person.
-// Not a credential and not an authentication mechanism - an attribution label.
-struct OperatorIdentity {
-    std::string invokingUser = "unknown-operator";
-    uint32_t invokingUid = 0;
-    std::string effectiveUser = "unknown";
-    uint32_t effectiveUid = 0;
-    // True when the effective user is not the invoking user.
-    bool elevated = false;
-};
-
-// Exposed so the behaviour can be tested: the point of the function is what it
-// does when SUDO_USER is set, and that cannot be checked while it is hidden.
-OperatorIdentity currentOperatorIdentity();
+// Inside the evidence directory, the two kinds of output are kept apart:
+//   <dir>/audit/    the evidence bundles - the system of record
+//   <dir>/reports/  renderings of a bundle (for example a PDF certificate)
+// A report is derived from a bundle and carries that bundle's canonical hash.
+// It is never read back as a record; only audit/ is.
+constexpr const char* kAuditSubdirectory = "audit";
+constexpr const char* kReportsSubdirectory = "reports";
 
 struct CliOptions {
     std::string command;
@@ -219,58 +211,20 @@ public:
     // Writes the command summary to stdout.
     static void printUsage();
 
-    // Default evidence path for a job: <evidence dir>/<job id>.json
+    // Default evidence path for a job: <evidence dir>/audit/<job id>.json
     static std::string defaultEvidencePath(const std::string& jobId,
                                            const std::string& directory);
 
+    // Default destination for a rendered report:
+    // <evidence dir>/reports/<job id>.<extension>
+    static std::string defaultReportPath(const std::string& jobId,
+                                         const std::string& directory,
+                                         const std::string& extension);
+
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl_;
 };
 
-class OutputFormatter {
-public:
-    OutputFormatter();
-    ~OutputFormatter();
-
-    void setJsonOutput(bool enabled);
-    void setVerbose(bool enabled);
-
-    // Typed writers. There is deliberately no generic output<T>(): every
-    // consumer needs domain-specific formatting, and a catch-all writer would
-    // silently lose fields.
-    Result<void> outputDeviceList(const std::vector<DeviceInfo>& devices);
-    Result<void> outputDeviceInfo(const DeviceInfo& device);
-    Result<void> outputCapabilityInfo(const CapabilityInfo& capabilities);
-    Result<void> outputPlan(const SanitizationPlan& plan);
-    Result<void> outputJobStatus(const JobStatus& status);
-    Result<void> outputVerificationReport(const VerificationReport& report);
-    Result<void> outputValidationReport(const ValidationReport& report);
-    Result<void> outputAuditRecord(const AuditRecord& record);
-    Result<void> outputError(const SanitizerError& error);
-    Result<void> outputMessage(const std::string& message);
-    Result<void> outputWarning(const std::string& message);
-
-    // The terminal limitation view: grouped under at most four headings and
-    // capped at a few lines, with a pointer to the evidence file for the full
-    // list. Under --verbose the full list is printed here instead, with IDs,
-    // and it is not printed again at the end of the run.
-    //
-    // `evidencePath` is the file the full list is in. `alreadyPrinted` tells
-    // the caller whether the full list has already gone to the terminal, so
-    // the same list is never shown twice in one run.
-    Result<void> outputLimitations(const LimitationSet& limitations,
-                                   const std::string& evidencePath);
-    bool fullLimitationListPrinted() const;
-
-private:
-    class Impl;
-    std::unique_ptr<Impl> pImpl_;
-    bool jsonOutput_ = false;
-    bool verbose_ = false;
-    // Set once the full limitation list has gone to the terminal, so the
-    // end-of-run summary does not print it a second time.
-    bool fullListPrinted_ = false;
-};
 
 } // namespace ledgerase

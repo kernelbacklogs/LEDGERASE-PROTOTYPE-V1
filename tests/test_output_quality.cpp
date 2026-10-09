@@ -4,10 +4,11 @@
 // by feeding it scripted values. The rate limiting is tested by driving a real
 // reporter through a callback sequence.
 
-#include "ledgerase/cli.hpp"
+#include "ledgerase/operator.hpp"
+#include "ledgerase/reporting.hpp"
 #include "ledgerase/evidence.hpp"
 #include "ledgerase/limitations.hpp"
-#include "ledgerase/progress_reporter.hpp"
+#include "evidence/reports/progress_reporter.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -598,6 +599,8 @@ void testNoBannedWordInUserFacingStrings() {
     std::vector<std::string> files;
     collectSources(sourceDir + "/src", files);
     collectSources(sourceDir + "/include", files);
+    collectSources(sourceDir + "/cli", files);
+    collectSources(sourceDir + "/gui", files);
     check(!files.empty(), "source files were found to scan");
 
     std::size_t literals = 0;

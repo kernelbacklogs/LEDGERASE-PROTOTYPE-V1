@@ -3,7 +3,7 @@
 What this tool can actually do to a filesystem, and what it refuses.
 
 This table is generated from `include/sanitizer/filesystem_capability.hpp` and
-`src/filesystem/filesystem_capability.cpp`, and a test asserts that the
+`src/device/filesystem_capability.cpp`, and a test asserts that the
 documentation and the code cover the same rows. The measurements behind several
 of the cells are in [RESIDUE.md](RESIDUE.md).
 

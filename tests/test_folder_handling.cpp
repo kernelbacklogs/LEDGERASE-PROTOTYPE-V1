@@ -16,7 +16,7 @@
 // code does to a real directory tree.
 
 #include "ledgerase/erasure.hpp"
-#include "ledgerase/platform/linux.hpp"
+#include "platform/linux/linux.hpp"
 
 #include <cstdio>
 #include <filesystem>

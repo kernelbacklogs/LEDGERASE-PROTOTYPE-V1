@@ -2,6 +2,7 @@
 // Ed25519 signing, and the honesty gates that prevent a bundle from reporting a
 // stronger outcome than its inputs support.
 
+#include "ledgerase/erasure.hpp"
 #include "ledgerase/evidence.hpp"
 #include "ledgerase/limitations.hpp"
 #include "ledgerase/json_adapters.hpp"
