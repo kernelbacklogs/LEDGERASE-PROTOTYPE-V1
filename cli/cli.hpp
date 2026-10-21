@@ -161,6 +161,11 @@ struct CliOptions {
     bool attestIndependentVerification = false;
     // Records that identity was confirmed against the physical label.
     bool attestIdentityConfirmed = false;
+
+    // list-devices: also list the regular files in this directory, as disk
+    // images. Empty means only the devices the kernel knows about are listed,
+    // which is what plain "list-devices" has always done.
+    std::string imagesDirectory;
 };
 
 class CliApplication {

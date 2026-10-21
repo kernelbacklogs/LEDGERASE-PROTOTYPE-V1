@@ -987,6 +987,8 @@ int CliApplication::run(int argc, char* argv[]) {
             options.overwritePassCount = static_cast<uint8_t>(parsed);
         } else if (arg == "--force") {
             options.force = true;
+        } else if (arg == "--images" && i + 1 < argc) {
+            options.imagesDirectory = argv[++i];
         } else if (arg[0] != '-') {
             const bool wantsJob = commandTakesJobId(options.command);
             if (wantsJob) {
@@ -1177,6 +1179,10 @@ void CliApplication::printUsage() {
     std::cout << "                            files. Omit it and only a report is made.\n";
     std::cout << "                            Refused when the directory is on the same\n";
     std::cout << "                            filesystem or device as the source.\n";
+    std::cout << "  --images <dir>            list-devices only: also list the regular\n";
+    std::cout << "                            files in this directory as disk images,\n";
+    std::cout << "                            with their real size. Plain list-devices\n";
+    std::cout << "                            lists only the devices the kernel knows.\n";
     std::cout << "  --recursive, -r          erase-folder: descend into subdirectories.\n"
                  "                            Off by default: a recursive run can reach\n"
                  "                            files the operator did not enumerate.\n";
@@ -2267,6 +2273,49 @@ Result<void> CliApplication::listDevices(const CliOptions& options) {
 
     auto devices = devicesResult.value();
 
+    // The regular files in a directory, as image entries.
+    //
+    // A disk image is a file, not a device: there is no kernel behind it, so
+    // it has no transport, no serial and no rotational flag. What it has is a
+    // size, and that is what the listing reports. Only regular files are
+    // listed: a directory or a device node in the same place is not an image.
+    if (!options.imagesDirectory.empty()) {
+        std::error_code dirEc;
+        std::filesystem::directory_iterator it(options.imagesDirectory, dirEc);
+        if (dirEc) {
+            return Result<void>::err(
+                ErrorCode::IO_ERROR,
+                "Cannot read the image directory " + options.imagesDirectory +
+                    ": " + dirEc.message(),
+                "Give a directory that exists and can be listed.");
+        }
+        std::vector<DeviceInfo> images;
+        for (const auto& entry : it) {
+            std::error_code fileEc;
+            if (!entry.is_regular_file(fileEc) || fileEc) {
+                continue;
+            }
+            DeviceInfo info;
+            info.path = entry.path().string();
+            info.model = entry.path().filename().string();
+            info.mediaType = MediaType::IMAGE;
+            info.identitySource = "file size";
+            std::error_code sizeEc;
+            const uintmax_t size = std::filesystem::file_size(entry.path(), sizeEc);
+            if (!sizeEc) {
+                info.capacityBytes = static_cast<uint64_t>(size);
+            }
+            images.push_back(std::move(info));
+        }
+        // Sorted, so the listing does not depend on the order the filesystem
+        // happened to hand the entries over in.
+        std::sort(images.begin(), images.end(),
+                  [](const DeviceInfo& a, const DeviceInfo& b) {
+                      return a.path < b.path;
+                  });
+        devices.insert(devices.end(), images.begin(), images.end());
+    }
+
 
     if (options.jsonOutput) {
         nlohmann::json j = nlohmann::json::array();
@@ -2305,7 +2354,7 @@ Result<void> CliApplication::listDevices(const CliOptions& options) {
                       << std::setw(16) << dev.path
                       << std::setw(24) << dev.model.substr(0, 23)
                       << std::setw(10) << mediaTypeToString(dev.mediaType)
-                      << std::setw(12) << (std::to_string(dev.capacityBytes / (1024*1024*1024)) + " GB")
+                      << std::setw(12) << formatCapacity(dev.capacityBytes)
                       << std::setw(10) << transportToString(dev.transport)
                       << std::setw(8) << rotationalColumn(dev)
                       << std::setw(8) << (dev.mounted ? "Yes" : "No")

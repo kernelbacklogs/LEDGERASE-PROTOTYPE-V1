@@ -879,12 +879,10 @@ Result<std::string> SanitizationPlanner::generatePlanReport(const SanitizationPl
         std::ostringstream short_oss;
         short_oss << "Sanitization plan\n";
         // Integer gigabytes made every test image read "0 GB", which is
-        // accurate and useless. Below a gibibyte the size is shown in MiB.
-        const uint64_t gib = 1024ull * 1024 * 1024;
-        std::string size =
-            plan.device.capacityBytes >= gib
-                ? std::to_string(plan.device.capacityBytes / gib) + " GB"
-                : std::to_string(plan.device.capacityBytes / (1024 * 1024)) + " MB";
+        // accurate and useless. formatCapacity() is the one place that
+        // decides which unit a size is shown in, and it drops to MiB below a
+        // gibibyte.
+        const std::string size = formatCapacity(plan.device.capacityBytes);
         short_oss << "  Device:     " << plan.device.path << "  ("
                   << plan.device.model << ", " << plan.device.serial << ", "
                   << size << ", "
@@ -968,7 +966,7 @@ Result<std::string> SanitizationPlanner::generatePlanReport(const SanitizationPl
     oss << "=== SANITIZATION PLAN ===\n\n";
     oss << "Job ID: " << plan.jobId << "\n";
     oss << "Device: " << plan.device.path << " (" << plan.device.model << " " << plan.device.serial << ")\n";
-    oss << "Capacity: " << (plan.device.capacityBytes / (1024*1024*1024)) << " GB\n";
+    oss << "Capacity: " << formatCapacity(plan.device.capacityBytes) << "\n";
     oss << "Transport: " << transportToString(plan.device.transport) << "\n";
     oss << "Media Type: " << mediaTypeToString(plan.device.mediaType) << "\n\n";
 

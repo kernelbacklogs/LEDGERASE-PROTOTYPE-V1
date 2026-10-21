@@ -29,7 +29,12 @@ enum class MediaType {
     SSD,
     HYBRID,
     REMOVABLE,
-    OPTICAL
+    OPTICAL,
+    // A disk image: a regular file that holds a filesystem, not a device.
+    // There is no kernel and no bus behind it, so it has no transport, no
+    // serial and no rotational flag. It has a size, and that is what the
+    // listing reports.
+    IMAGE
 };
 
 enum class SanitizationCategory {
@@ -461,6 +466,18 @@ struct RecoveryTestResult {
 
 std::string transportToString(TransportType t);
 std::string mediaTypeToString(MediaType t);
+
+// A capacity, in the unit a reader can act on.
+//
+// At and above one gibibyte the figure is given in whole gibibytes, which is
+// how a drive is sold and how an operator reads a listing. Below that it is
+// given in mebibytes, or in bytes below a mebibyte.
+//
+// The reason for the change of unit is that rounding down to whole gibibytes
+// would report "0 GB" for a medium that is not empty. A 512 MiB disk image is
+// not zero bytes, and a listing that says it is would be wrong about the only
+// thing the listing states about it.
+std::string formatCapacity(uint64_t bytes);
 std::string categoryToString(SanitizationCategory c);
 std::string methodToString(SanitizationMethod m);
 std::string capabilityToString(CapabilityStatus c);

@@ -24,8 +24,21 @@ std::string mediaTypeToString(MediaType t) {
         case MediaType::HYBRID: return "Hybrid";
         case MediaType::REMOVABLE: return "Removable";
         case MediaType::OPTICAL: return "Optical";
+        case MediaType::IMAGE: return "Image";
         default: return "Unknown";
     }
+}
+
+std::string formatCapacity(uint64_t bytes) {
+    constexpr uint64_t kGiB = 1024ull * 1024ull * 1024ull;
+    constexpr uint64_t kMiB = 1024ull * 1024ull;
+    if (bytes >= kGiB) {
+        return std::to_string(bytes / kGiB) + " GB";
+    }
+    if (bytes >= kMiB) {
+        return std::to_string(bytes / kMiB) + " MB";
+    }
+    return std::to_string(bytes) + " B";
 }
 
 std::string categoryToString(SanitizationCategory c) {

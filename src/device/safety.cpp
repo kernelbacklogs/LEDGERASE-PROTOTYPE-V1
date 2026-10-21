@@ -528,7 +528,7 @@ Result<void> ConfirmationManager::requireSerialConfirmation(const DeviceInfo& de
     std::cout << "Device: " << device.path << "\n";
     std::cout << "Model:  " << device.model << "\n";
     std::cout << "Serial: " << (device.serial.empty() ? "<NOT ESTABLISHED>" : device.serial) << "\n";
-    std::cout << "Capacity: " << (device.capacityBytes / (1024*1024*1024)) << " GB\n";
+    std::cout << "Capacity: " << formatCapacity(device.capacityBytes) << "\n";
     std::cout << "\nTHIS OPERATION IS IRREVERSIBLE.\n";
 
     // Refuse before asking, rather than after.
