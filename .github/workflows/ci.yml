@@ -1,0 +1,71 @@
+name: CI
+
+# Three jobs, all building the same tree:
+#
+#   debug    -Werror Debug build, full test suite
+#   release -Werror Release build, full test suite
+#   no-cli   the library alone, with BUILD_CLI=OFF
+#
+# The project already compiles with -Wall -Wextra -Wpedantic -Werror in both
+# configurations, so a warning is a failure here exactly as it is locally.
+#
+# The no-cli job exists because the CLI is optional: the core library is what
+# a GUI or another consumer links against, and it must build without the
+# command-line front end. With BUILD_CLI=OFF the two suites that drive the
+# real CLI binary are not registered, so this job runs the other fifteen.
+
+on:
+  push:
+    branches: [main, public, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: debug
+            build_type: Debug
+            cli: "ON"
+          - name: release
+            build_type: Release
+            cli: "ON"
+          - name: no-cli
+            build_type: Release
+            cli: "OFF"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4.4.0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libudev-dev \
+            uuid-dev \
+            libblkid-dev \
+            libssl-dev \
+            e2fsprogs
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DBUILD_CLI=${{ matrix.cli }}
+          -DBUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
