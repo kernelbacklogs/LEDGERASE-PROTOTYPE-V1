@@ -166,6 +166,15 @@ struct CliOptions {
     // images. Empty means only the devices the kernel knows about are listed,
     // which is what plain "list-devices" has always done.
     std::string imagesDirectory;
+
+    // "evidence migrate": the directory whose flat bundles are to be moved
+    // into its audit/ subdirectory. Empty means the default evidence
+    // directory.
+    std::string migrateDirectory;
+    // "evidence migrate": perform the move. Without it the command reports
+    // what it would do and changes nothing, so a directory is never changed
+    // by a command that was not asked to change it.
+    bool applyMigrate = false;
 };
 
 class CliApplication {
@@ -200,6 +209,15 @@ public:
     // Renders the evidence bundle for a job, optionally signing it. Durable,
     // hash-chained, verifiable, and the tool's only system of record.
     Result<void> showEvidence(const CliOptions& options);
+
+    // "evidence migrate": moves the bundles that were written before audit/
+    // and reports/ were separated out of the evidence directory and into its
+    // audit/ subdirectory.
+    //
+    // The file is moved, never re-read and re-written: the bytes on disk are
+    // the record, and a bundle whose hash and chain verify before the move
+    // must verify identically after it. A dry run unless asked otherwise.
+    Result<void> migrateEvidence(const CliOptions& options);
 
     // Verifies an evidence file produced by another run or another tool.
     Result<void> verifyEvidenceFile(const CliOptions& options);

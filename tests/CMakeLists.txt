@@ -161,6 +161,28 @@ if(TARGET ledgerase-cli)
     )
     add_dependencies(test_evidence_layout ledgerase-cli)
     add_test(NAME test_evidence_layout COMMAND test_evidence_layout)
+
+    # list-devices --images: the images in a directory, with their real size,
+    # and the capacity formatting shared with the rest of the tool.
+    add_executable(test_list_images test_list_images.cpp)
+    target_link_libraries(test_list_images PRIVATE ledgerase-core)
+    target_compile_definitions(test_list_images PRIVATE
+        LEDGERASE_CLI_PATH="$<TARGET_FILE:ledgerase-cli>"
+    )
+    add_dependencies(test_list_images ledgerase-cli)
+    target_include_directories(test_list_images PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+    )
+    add_test(NAME test_list_images COMMAND test_list_images)
+
+    # evidence migrate: moving the bundles written before audit/ and reports/
+    # were separated, without re-writing a byte of them.
+    add_executable(test_evidence_migrate test_evidence_migrate.cpp)
+    target_compile_definitions(test_evidence_migrate PRIVATE
+        LEDGERASE_CLI_PATH="$<TARGET_FILE:ledgerase-cli>"
+    )
+    add_dependencies(test_evidence_migrate ledgerase-cli)
+    add_test(NAME test_evidence_migrate COMMAND test_evidence_migrate)
 endif()
 
 # The local assurance policy: a judgement encoded as a function. What matters is
@@ -219,5 +241,7 @@ set_tests_properties(
     test_device_readonly
     test_folder_handling
     test_evidence_layout
+    test_list_images
+    test_evidence_migrate
     PROPERTIES SKIP_RETURN_CODE 77
 )

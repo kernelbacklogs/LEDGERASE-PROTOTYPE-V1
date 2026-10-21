@@ -132,6 +132,37 @@ bool commandTakesTarget(const std::string& command) {
            command == "capabilities" || command == "inspect";
 }
 
+// The schema of an evidence bundle on disk, or an empty string when the file
+// is not an evidence bundle.
+//
+// Read from the stored document rather than through the bundle reader, so
+// that a file which is not JSON at all, or is JSON but not a bundle, is
+// recognised as such instead of being reported as a damaged bundle.
+std::string evidenceSchemaOf(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return {};
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    nlohmann::json document;
+    try {
+        document = nlohmann::json::parse(buffer.str());
+    } catch (const nlohmann::json::parse_error&) {
+        return {};
+    }
+    if (!document.is_object() || !document.contains("schema")) {
+        return {};
+    }
+    const std::string schema = document.at("schema").get<std::string>();
+    for (const char* supported : EvidenceBundle::kSupportedSchemas) {
+        if (schema == supported) {
+            return schema;
+        }
+    }
+    return {};
+}
+
 } // namespace
 
 class CliApplication::Impl {
@@ -989,9 +1020,18 @@ int CliApplication::run(int argc, char* argv[]) {
             options.force = true;
         } else if (arg == "--images" && i + 1 < argc) {
             options.imagesDirectory = argv[++i];
+        } else if (arg == "--apply") {
+            options.applyMigrate = true;
         } else if (arg[0] != '-') {
             const bool wantsJob = commandTakesJobId(options.command);
-            if (wantsJob) {
+            if (options.command == "evidence" && options.jobId == "migrate") {
+                // "evidence migrate <dir>": the directory is the second
+                // positional. It is kept out of jobId so a job whose id
+                // happens to be "migrate" is still reachable.
+                if (options.migrateDirectory.empty()) {
+                    options.migrateDirectory = arg;
+                }
+            } else if (wantsJob) {
                 if (options.jobId.empty()) {
                     options.jobId = arg;
                 }
@@ -1127,6 +1167,11 @@ void CliApplication::printUsage() {
     std::cout << "                            device, read-only, by signature carving\n";
     std::cout << "  audit [job-id]            List the evidence records, or show one\n";
     std::cout << "  evidence <job-id>         Show the evidence bundle for a job\n";
+    std::cout << "  evidence migrate <dir>    Move bundles written before audit/ and\n";
+    std::cout << "                            reports/ were separated into <dir>/audit/.\n";
+    std::cout << "                            A dry run unless --apply is given. The\n";
+    std::cout << "                            file is moved, never re-written, so the\n";
+    std::cout << "                            bytes and the hash are unchanged.\n";
     std::cout << "  verify-log <file>         Verify an evidence file (hash, chain, signature)\n";
     std::cout << "  shell                     Interactive session\n";
     std::cout << "  version                   Show version information\n\n";
@@ -1183,6 +1228,9 @@ void CliApplication::printUsage() {
     std::cout << "                            files in this directory as disk images,\n";
     std::cout << "                            with their real size. Plain list-devices\n";
     std::cout << "                            lists only the devices the kernel knows.\n";
+    std::cout << "  --apply                  evidence migrate only: perform the move.\n";
+    std::cout << "                            Without it the command is a dry run and\n";
+    std::cout << "                            changes nothing.\n";
     std::cout << "  --recursive, -r          erase-folder: descend into subdirectories.\n"
                  "                            Off by default: a recursive run can reach\n"
                  "                            files the operator did not enumerate.\n";
@@ -3379,10 +3427,210 @@ Result<void> CliApplication::showAudit(const CliOptions& options) {
     return Result<void>::success();
 }
 
+// Moves the bundles that were written before audit/ and reports/ were
+// separated out of the evidence directory and into its audit/ subdirectory.
+//
+// The file is moved, never re-read and re-written. A bundle is a record: the
+// bytes on disk are what a third party verifies, and re-serialising it would
+// produce a different document even when nothing had changed. The move is a
+// rename within one filesystem, so the bytes that arrive are the bytes that
+// left, and the hash and the chain are checked again at the destination.
+//
+// A dry run unless --apply is given. A directory of records is not changed by
+// a command that was not asked to change it.
+//
+// A bundle is moved only if it verifies. One that does not is left exactly
+// where it is and reported, because a damaged record is itself evidence and
+// moving it would hide where it was found.
+//
+// reports/ is not touched: the scan is not recursive, so only the bundles that
+// sit directly in the evidence directory are considered.
+Result<void> CliApplication::migrateEvidence(const CliOptions& options) {
+    const std::string directory =
+        options.migrateDirectory.empty() ? defaultEvidenceDirectory()
+                                          : options.migrateDirectory;
+
+    std::error_code dirEc;
+    if (!std::filesystem::is_directory(directory, dirEc)) {
+        return Result<void>::err(
+            ErrorCode::INVALID_ARGUMENT,
+            "No such evidence directory: " + directory,
+            "Give the directory that holds the bundles to move.");
+    }
+
+    // The candidates: regular files sitting directly in the evidence
+    // directory. The scan is not recursive, so audit/ and reports/ are not
+    // reached at all.
+    std::vector<std::string> candidates;
+    {
+        std::error_code ec;
+        std::filesystem::directory_iterator it(directory, ec);
+        if (ec) {
+            return Result<void>::err(
+                ErrorCode::IO_ERROR,
+                "Cannot list the evidence directory " + directory + ": " +
+                    ec.message(),
+                "Check the path and its permissions.");
+        }
+        for (const auto& entry : it) {
+            std::error_code fileEc;
+            if (!entry.is_regular_file(fileEc) || fileEc) {
+                continue;
+            }
+            if (entry.path().extension() != ".json") {
+                continue;
+            }
+            candidates.push_back(entry.path().string());
+        }
+    }
+    std::sort(candidates.begin(), candidates.end());
+
+    const bool apply = options.applyMigrate;
+    size_t moved = 0;
+    size_t notBundles = 0;
+    size_t refused = 0;
+
+    std::cout << (apply ? "Migrating evidence bundles" : "Evidence migration (dry run)")
+              << " in " << directory << "\n";
+    if (!apply) {
+        std::cout << "Nothing is changed without --apply.\n";
+    }
+    std::cout << "\n";
+
+    const std::string auditDirectory = directory + "/" + kAuditSubdirectory;
+
+    for (const std::string& source : candidates) {
+        const std::string name =
+            std::filesystem::path(source).filename().string();
+        const std::string destination = auditDirectory + "/" + name;
+
+        // Is this an evidence bundle at all? A file that is not one is not
+        // moved and not an error: the evidence directory may hold other JSON,
+        // and the command is about bundles.
+        const std::string schema = evidenceSchemaOf(source);
+        if (schema.empty()) {
+            std::cout << "  not a bundle   " << name
+                      << "  (left where it is)\n";
+            ++notBundles;
+            continue;
+        }
+
+        // A bundle that does not verify is not moved. A damaged record is
+        // evidence in its own right, and moving it would hide where it was
+        // found.
+        const auto before = EvidenceVerifier::verifyStructure(source);
+        if (before.isError() || !before.value().canonicalHashMatches ||
+            !before.value().chainConsistent) {
+            std::cout << "  NOT VERIFIED  " << name
+                      << "  (left where it is)\n";
+            if (before.isError()) {
+                std::cout << "                 " << before.error().what() << "\n";
+            } else {
+                for (const std::string& finding : before.value().findings) {
+                    if (finding.find("MISMATCH") != std::string::npos ||
+                        finding.find("FAILED") != std::string::npos) {
+                        std::cout << "                 " << finding << "\n";
+                    }
+                }
+            }
+            ++refused;
+            continue;
+        }
+
+        // Refuse to overwrite. A bundle already in audit/ is a record; it is
+        // not this command's to replace.
+        if (std::filesystem::exists(destination)) {
+            std::cout << "  EXISTS        " << name
+                      << "  (refused to overwrite " << kAuditSubdirectory
+                      << "/" << name << ")\n";
+            ++refused;
+            continue;
+        }
+
+        if (!apply) {
+            std::cout << "  would move    " << name << "  ->  "
+                      << kAuditSubdirectory << "/" << name << "\n";
+            ++moved;
+            continue;
+        }
+
+        // The destination directory, owner-only, as the rest of the evidence
+        // tree is.
+        if (!std::filesystem::exists(auditDirectory)) {
+            std::error_code createEc;
+            std::filesystem::create_directories(auditDirectory, createEc);
+            if (createEc) {
+                std::cout << "  FAILED        " << name << "  (cannot create "
+                          << kAuditSubdirectory << ": " << createEc.message()
+                          << ")\n";
+                ++refused;
+                continue;
+            }
+            std::error_code permEc;
+            std::filesystem::permissions(
+                auditDirectory, std::filesystem::perms::owner_all,
+                std::filesystem::perm_options::replace, permEc);
+        }
+
+        // A rename, so the bytes are the bytes. Not a read and a write.
+        std::error_code moveEc;
+        std::filesystem::rename(source, destination, moveEc);
+        if (moveEc) {
+            std::cout << "  FAILED        " << name << "  (" << moveEc.message()
+                      << ")\n";
+            ++refused;
+            continue;
+        }
+
+        // Checked again at the destination: the same document, verified the
+        // same way, in its new place.
+        const auto after = EvidenceVerifier::verifyStructure(destination);
+        const bool intact = !after.isError() && after.value().canonicalHashMatches &&
+                            after.value().chainConsistent;
+        if (!intact) {
+            std::cout << "  FAILED        " << name
+                      << "  (moved, but it does not verify at the "
+                         "destination)\n";
+            ++refused;
+            continue;
+        }
+
+        std::cout << "  moved         " << name << "  ->  "
+                  << kAuditSubdirectory << "/" << name
+                  << "  (hash and chain verified before and after)\n";
+        ++moved;
+    }
+
+    std::cout << "\n";
+    if (apply) {
+        std::cout << moved << " bundle(s) moved, " << notBundles
+                  << " file(s) that were not bundles, " << refused
+                  << " refused.\n";
+    } else {
+        std::cout << moved << " bundle(s) would be moved, " << notBundles
+                  << " file(s) that were not bundles, " << refused
+                  << " refused. Nothing was changed.\n";
+    }
+
+    if (refused > 0) {
+        return Result<void>::err(
+            ErrorCode::IO_ERROR,
+            std::to_string(refused) +
+                " bundle(s) were not moved. They are listed above with the "
+                "reason.",
+            "A bundle that does not verify is left where it is. Look at it "
+            "before moving it by hand.");
+    }
+    return Result<void>::success();
+}
+
 // Renders the evidence bundle for a job, optionally signing it and writing it to
 // a new path. Reading is from the durable record, so this works for a job from
 // any process.
 Result<void> CliApplication::showEvidence(const CliOptions& options) {
+    if (options.jobId == "migrate") {
+        return migrateEvidence(options);
+    }
     if (options.jobId.empty()) {
         return Result<void>::err(
             ErrorCode::INVALID_ARGUMENT,
