@@ -27,6 +27,8 @@
 #include "platform/linux/linux.hpp"
 #include "ledgerase/safety.hpp"
 
+#include "test_support.hpp"
+
 #include <cstdio>
 #include <filesystem>
 #include <fcntl.h>
@@ -45,6 +47,7 @@ namespace fs = std::filesystem;
 namespace {
 
 int g_failures = 0;
+int g_skipped = 0;
 
 void check(bool condition, const std::string& what) {
     if (condition) {
@@ -53,6 +56,33 @@ void check(bool condition, const std::string& what) {
     }
     std::printf("  FAIL %s\n", what.c_str());
     ++g_failures;
+}
+
+// A check that could not run here, because the environment does not support
+// it. Reported, and the suite's exit code says so, so a gap in what was
+// verified is never read as a pass.
+void skip(const std::string& what) {
+    std::printf("  SKIP %s\n", what.c_str());
+    ++g_skipped;
+}
+
+// Whether the file mode bits are enforced for this process.
+//
+// They are not for a process that holds the privilege to override them: root
+// opens a file whose mode says it cannot be written. Two of the cases below
+// are about a file that cannot be written, and for such a process they cannot
+// be made at all. The probe asks the kernel directly, by trying, so the answer
+// is the one that matters and not an assumption about the uid.
+bool g_modeBitsEnforced = true;
+
+void probeWhetherModeBitsAreEnforced() {
+    const fs::path p = fs::temp_directory_path() / "sanitizer-perm-probe";
+    { std::ofstream o(p, std::ios::trunc); o << "x"; }
+    std::error_code ec;
+    fs::permissions(p, fs::perms::owner_read, ec);
+    const Result<bool> writable = plat::canOpenForWrite(p.string());
+    g_modeBitsEnforced = writable.isError() || !writable.value();
+    fs::remove(p, ec);
 }
 
 // A synthetic sysfs tree. `block/<name>/ro` is written with the given value, or
@@ -222,19 +252,28 @@ void testDiskImageIsAnsweredOnItsOwnTerms() {
 
     // A file that cannot be written is a definite fact and must block, not be
     // reported as an unknown - the operator needs to be told what is wrong.
-    const fs::path locked = fs::temp_directory_path() / "sanitizer-ro-locked.img";
-    { std::ofstream o(locked, std::ios::trunc); o << "x"; }
-    fs::permissions(locked, fs::perms::owner_read, ec);
-    const plat::ReadOnlyStatus lockedStatus =
-        plat::deviceReadOnlyStatus(locked.string(), sysfs.str());
-    check(lockedStatus.established,
-          "a non-writable image is a known state, not an unknown one");
-    check(lockedStatus.readOnly, "and it is reported as not writable");
-    check(!lockedStatus.openError.empty(),
-          "with the errno recorded, so the reason survives");
+    //
+    // This needs the file mode bits to be enforced for this process. They are
+    // not for a process that holds the privilege to override them, and then a
+    // non-writable file is writable and the case cannot be made at all.
+    if (!g_modeBitsEnforced) {
+        skip("this process may write a file with no write permission, so the "
+             "non-writable image case could not be exercised here");
+    } else {
+        const fs::path locked = fs::temp_directory_path() / "sanitizer-ro-locked.img";
+        { std::ofstream o(locked, std::ios::trunc); o << "x"; }
+        fs::permissions(locked, fs::perms::owner_read, ec);
+        const plat::ReadOnlyStatus lockedStatus =
+            plat::deviceReadOnlyStatus(locked.string(), sysfs.str());
+        check(lockedStatus.established,
+              "a non-writable image is a known state, not an unknown one");
+        check(lockedStatus.readOnly, "and it is reported as not writable");
+        check(!lockedStatus.openError.empty(),
+              "with the errno recorded, so the reason survives");
+        fs::remove(locked, ec);
+    }
 
     fs::remove(image, ec);
-    fs::remove(locked, ec);
 }
 
 // --- diagnostics ----------------------------------------------------------
@@ -278,15 +317,30 @@ void testWriteAccessCheckDoesNotFalsePass() {
     fs::permissions(p, fs::perms::owner_read, ec);   // S_IWUSR clear
 
     const Result<bool> writable = plat::canOpenForWrite(p.string());
-    check(writable.isError(), "a file with no write permission is not writable");
-    check(std::string(writable.error().what()).size() > 0,
-          "and the error explains why");
-    // The message must carry the errno, not just "no".
-    bool numeric = false;
-    for (const char c : std::string(writable.error().what())) {
-        if (c >= '0' && c <= '9') { numeric = true; break; }
+    if (!g_modeBitsEnforced) {
+        // The mode bits are advisory for this process: it holds the privilege
+        // that lets it write a file whose mode says it cannot be written. The
+        // assertion below is about what the kernel decides for an unprivileged
+        // process, and it cannot hold here, so it is reported as skipped
+        // rather than failed. The positive case below still runs.
+        skip("this process may write a file with no write permission, so the "
+             "mode-bit case could not be exercised here");
+    } else {
+        check(writable.isError(), "a file with no write permission is not writable");
+        if (writable.isError()) {
+            // error() throws when there is no error, so it is only read when
+            // there is one. Asking for it unconditionally turned a result this
+            // build cannot produce into an uncaught exception.
+            check(std::string(writable.error().what()).size() > 0,
+                  "and the error explains why");
+            // The message must carry the errno, not just "no".
+            bool numeric = false;
+            for (const char c : std::string(writable.error().what())) {
+                if (c >= '0' && c <= '9') { numeric = true; break; }
+            }
+            check(numeric, "the diagnostic carries a numeric errno or code");
+        }
     }
-    check(numeric, "the diagnostic carries a numeric errno or code");
 
     // And the positive case: a file this process may write.
     const fs::path w = fs::temp_directory_path() / "sanitizer-perm-writable";
@@ -460,6 +514,10 @@ void testRealBlockDeviceIfOneIsOpenable() {
 int main() {
     std::printf("device read-only determination and write-access checks\n");
 
+    // Asked once, because two of the cases below need the file mode bits to
+    // be enforced for this process, and they cannot be made when they are not.
+    probeWhetherModeBitsAreEnforced();
+
     testUnopenableWritableDeviceDetected();
     testUnopenableReadOnlyDeviceDetected();
     testUndeterminableStateFailsClosed();
@@ -474,6 +532,10 @@ int main() {
     testRealBlockDeviceIfOneIsOpenable();
 
     if (g_failures == 0) {
+        if (g_skipped > 0) {
+            std::printf("\n%d check(s) skipped: a gap, not a pass.\n", g_skipped);
+            return kSkipExitCode;
+        }
         std::printf("\nAll read-only/access checks passed.\n");
         return 0;
     }

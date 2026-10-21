@@ -200,3 +200,24 @@ target_include_directories(test_device_readonly PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
 add_test(NAME test_device_readonly COMMAND test_device_readonly)
+
+# A suite that could not run a check because the environment does not support
+# it exits with kSkipExitCode (see tests/test_support.hpp), and CTest is told
+# to read that exit code as "Skipped" rather than as a pass. A gap in what was
+# verified is not a pass.
+#
+# The suites listed here are the ones that can be blocked by the environment:
+#   test_output_quality   needs the invoking user to be in the passwd database
+#   test_device_readonly  needs the process to be subject to the file mode bits
+#   test_folder_handling  needs /proc to expose another process's descriptors
+#   test_evidence_layout  needs the CLI to be able to write a bundle here
+#
+# This is set after the add_test() calls, because a property can only be set
+# on a test that already exists.
+set_tests_properties(
+    test_output_quality
+    test_device_readonly
+    test_folder_handling
+    test_evidence_layout
+    PROPERTIES SKIP_RETURN_CODE 77
+)

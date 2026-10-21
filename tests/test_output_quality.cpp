@@ -10,6 +10,8 @@
 #include "ledgerase/limitations.hpp"
 #include "evidence/reports/progress_reporter.hpp"
 
+#include "test_support.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -17,6 +19,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <pwd.h>
 #include <set>
 #include <sstream>
 #include <string>
@@ -27,6 +30,7 @@ using namespace ledgerase;
 namespace {
 
 int g_failures = 0;
+int g_skipped = 0;
 
 void check(bool condition, const std::string& what) {
     if (condition) {
@@ -35,6 +39,13 @@ void check(bool condition, const std::string& what) {
     }
     std::printf("  FAIL %s\n", what.c_str());
     ++g_failures;
+}
+
+// A check that could not run here. Reported, and the suite's exit code says
+// so, so a gap in what was verified is never read as a pass.
+void skip(const std::string& what) {
+    std::printf("  SKIP %s\n", what.c_str());
+    ++g_skipped;
 }
 
 bool contains(const std::string& haystack, const std::string& needle) {
@@ -647,8 +658,18 @@ void testOperatorIdentityUnderSudo() {
     const OperatorIdentity plain = currentOperatorIdentity();
     check(!plain.invokingUser.empty(),
           "an invoking user is always determined, even with no sudo");
-    check(plain.invokingUid != 0,
-          "the invoking user's uid is resolved from the passwd database");
+    // The uid has to be the one the passwd database gives for the recorded
+    // name. Asserting that it is not zero instead would fail for a run as
+    // root, where zero is the correct answer and the uid was resolved
+    // perfectly well, and it would pass for any other wrong uid.
+    const struct passwd* entry = ::getpwnam(plain.invokingUser.c_str());
+    if (entry == nullptr) {
+        skip("the invoking user is not in the passwd database here, so the "
+             "uid could not be cross-checked against it");
+    } else {
+        check(plain.invokingUid == static_cast<uint32_t>(entry->pw_uid),
+              "the invoking user's uid is the one the passwd database gives");
+    }
     check(!plain.effectiveUser.empty(), "an effective user is always determined");
     if (plain.invokingUser == plain.effectiveUser) {
         check(!plain.elevated,
@@ -868,6 +889,10 @@ int main() {
     testRendering();
 
     if (g_failures == 0) {
+        if (g_skipped > 0) {
+            std::printf("\n%d check(s) skipped: a gap, not a pass.\n", g_skipped);
+            return kSkipExitCode;
+        }
         std::printf("\nAll progress and limitation checks passed.\n");
         return 0;
     }

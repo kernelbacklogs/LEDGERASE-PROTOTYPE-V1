@@ -9,6 +9,8 @@
 
 #include <sys/stat.h>
 
+#include "test_support.hpp"
+
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -220,6 +222,12 @@ int main() {
         std::printf("\n%d check(s) skipped: a gap, not a pass.\n", g_skipped);
     }
     if (g_failures == 0) {
+        if (g_skipped > 0) {
+            // A skipped check is a gap in what was verified. The suite says so
+            // through its exit code, so CTest records it as "Skipped" and not
+            // as "Passed".
+            return kSkipExitCode;
+        }
         std::printf("\nAll evidence layout checks passed.\n");
         return 0;
     }

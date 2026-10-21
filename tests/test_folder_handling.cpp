@@ -18,6 +18,8 @@
 #include "ledgerase/erasure.hpp"
 #include "platform/linux/linux.hpp"
 
+#include "test_support.hpp"
+
 #include <cstdio>
 #include <filesystem>
 #include <sys/stat.h>
@@ -35,6 +37,11 @@ namespace fs = std::filesystem;
 namespace {
 
 int g_failures = 0;
+int g_skipped = 0;
+
+// Whether this environment lets the test read another process's descriptors.
+// Probed once, before the checks that depend on it run.
+bool g_procReadable = true;
 
 void check(bool condition, const std::string& what) {
     if (condition) {
@@ -43,6 +50,49 @@ void check(bool condition, const std::string& what) {
     }
     std::printf("  FAIL %s\n", what.c_str());
     ++g_failures;
+}
+
+// A check that could not run here, because the environment does not support
+// it. Reported, and the suite's exit code says so, so a gap in what was
+// verified is never read as a pass.
+void skip(const std::string& what) {
+    std::printf("  SKIP %s\n", what.c_str());
+    ++g_skipped;
+}
+
+// Whether this environment lets the test read another process's open
+// descriptors.
+//
+// The open-file and mapped-executable checks below are about the tool's
+// refusal to overwrite a file that a running program holds. They are proved
+// by looking at /proc/<pid>/fd and /proc/<pid>/maps of a process this test
+// forks. That is a property of the environment, not of the code under test:
+// where /proc is not mounted, or is mounted so that another process's
+// descriptors cannot be listed, the checks cannot be made at all.
+//
+// The probe is a forked child, so it asks the same question the checks ask.
+bool canReadAnotherProcessesDescriptors() {
+    const pid_t child = ::fork();
+    if (child < 0) {
+        return false;
+    }
+    if (child == 0) {
+        for (;;) ::sleep(30);
+    }
+    bool readable = false;
+    const std::string fdDir = "/proc/" + std::to_string(child) + "/fd";
+    for (int i = 0; i < 100 && !readable; ++i) {
+        ::usleep(20 * 1000);
+        std::error_code ec;
+        std::filesystem::directory_iterator it(fdDir, ec);
+        if (!ec) {
+            readable = true;
+        }
+    }
+    ::kill(child, SIGKILL);
+    int status = 0;
+    ::waitpid(child, &status, 0);
+    return readable;
 }
 
 void writeFile(const fs::path& p, const std::string& body) {
@@ -353,6 +403,11 @@ void testSymlinkInsideFolderIsNotDoubleCounted() {   // each case builds its own
 // to hold the file until it is released.
 void testAnOpenFileIsRefused() {
     std::printf("a file open in another process is refused, not overwritten\n");
+    if (!g_procReadable) {
+        skip("this environment does not let the test read another process's "
+             "/proc entries, so the in-use case could not be exercised here");
+        return;
+    }
     const fs::path root = makeTree("sanitizer-safety-open");
     const fs::path target = root / "held.txt";
     writeFile(target, kMark + "-held");
@@ -415,6 +470,11 @@ void testAnOpenFileIsRefused() {
 
 void testTheOpenFileCheckIsNotSelfInflicted() {
     std::printf("the open-file check does not count this process's own handles\n");
+    if (!g_procReadable) {
+        skip("this environment does not let the test read another process's "
+             "/proc entries, so the in-use case could not be exercised here");
+        return;
+    }
     // findFileUse skips our own pid. If it did not, every file this tool opened
     // would look busy and the check would refuse everything - which is a bug
     // that looks like a safety feature, so it is worth pinning.
@@ -433,6 +493,12 @@ void testTheOpenFileCheckIsNotSelfInflicted() {
 
 void testMappedExecutableIsRefused() {
     std::printf("a mapped file is reported as mapped, from another process\n");
+    if (!g_procReadable) {
+        skip("this environment does not let the test read another process's "
+             "/proc entries, so the mapped-executable case could not be "
+             "exercised here");
+        return;
+    }
     // /proc/self/exe is mapped into this process, and this process is skipped by
     // design - the eraser holds its own descriptors open by definition, so
     // counting them would make every file look busy. A forked child is a pid the
@@ -540,6 +606,16 @@ void testDeviceNodesInsideAFolderAreRefused() {   // each case builds its own tr
 int main() {
     std::printf("folder handling: traversal, globs, symlink policy, safety, batch reporting\n");
 
+    // Probed before the checks that depend on it, so the ones that cannot run
+    // here say so instead of failing.
+    g_procReadable = canReadAnotherProcessesDescriptors();
+    if (!g_procReadable) {
+        std::printf("  NOTE: this environment does not let the test read "
+                    "another process's /proc entries.\n"
+                    "        The in-use and mapped-executable cases cannot be "
+                    "exercised here and are reported as skipped.\n");
+    }
+
     // Each case builds its own tree so one run cannot leave state that changes
     // another's answer.
     testNonRecursiveStaysAtTheTopLevel(makeTree("sanitizer-nonrec"));
@@ -557,6 +633,10 @@ int main() {
     testDeviceNodesInsideAFolderAreRefused();
 
     if (g_failures == 0) {
+        if (g_skipped > 0) {
+            std::printf("\n%d check(s) skipped: a gap, not a pass.\n", g_skipped);
+            return kSkipExitCode;
+        }
         std::printf("\nAll folder-handling checks passed.\n");
         return 0;
     }
