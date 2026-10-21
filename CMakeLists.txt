@@ -41,12 +41,20 @@ pkg_check_modules(OPENSSL openssl)
 
 # nlohmann/json is fetched at configure time, so it is a supply-chain input to a
 # tool whose entire purpose is trustworthy erasure. It is therefore pinned to an
-# immutable commit, not to the moving tag "v3.11.2".
+# exact release tag, and the commit that tag must resolve to is checked
+# afterwards.
 #
-# The commit below is the one the v3.11.2 tag resolves to (the v3.11.2 release
-# merge). Pinning the tag instead would mean re-resolving it on every fresh
-# configure: a tag can be moved to a different commit after the fact, and this
-# build would silently compile against whatever it points at then.
+# The tag is a release tag, not a branch: a branch moves, and this build would
+# then silently compile against whatever it points at. The tag is named
+# exactly, and the commit it resolves to is verified below, so neither a moved
+# tag nor an upstream mistake can change what is compiled in unnoticed.
+#
+# The version is v3.12.0 because the previous pin, v3.11.2, declares
+# cmake_minimum_required(VERSION 3.1). CMake 4.x removed compatibility with
+# anything below 3.5, so v3.11.2 cannot be configured by a current CMake
+# without -DCMAKE_POLICY_VERSION_MINIMUM=3.5. v3.12.0 declares
+# cmake_minimum_required(VERSION 3.5...4.0) and configures on CMake 4.x
+# unaided.
 #
 # The first configure of a pinned FetchContent still needs network access. To
 # verify what was actually checked out rather than trusting the pin alone, run
@@ -57,12 +65,14 @@ pkg_check_modules(OPENSSL openssl)
 # commit is not reachable by depth-limited clone unless it happens to be a branch
 # tip.
 include(FetchContent)
-set(LEDGERASE_NLOHMANN_JSON_SHA "bc889afb4c5bf1c0d8ee29ef35eaaf4c8bef8a5d" CACHE STRING
-    "Pinned nlohmann/json commit. Update deliberately, never automatically.")
+set(LEDGERASE_NLOHMANN_JSON_TAG "v3.12.0" CACHE STRING
+    "Pinned nlohmann/json release tag. Update deliberately, never automatically.")
+set(LEDGERASE_NLOHMANN_JSON_SHA "55f93686c01528224f448c19128836e7df245f72" CACHE STRING
+    "The commit LEDGERASE_NLOHMANN_JSON_TAG must resolve to. Checked after checkout.")
 FetchContent_Declare(
     nlohmann_json
     GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG ${LEDGERASE_NLOHMANN_JSON_SHA}
+    GIT_TAG ${LEDGERASE_NLOHMANN_JSON_TAG}
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
@@ -82,9 +92,10 @@ if(EXISTS "${nlohmann_json_SOURCE_DIR}/.git")
            AND NOT LEDGERASE_NLOHMANN_JSON_ACTUAL STREQUAL LEDGERASE_NLOHMANN_JSON_SHA)
             message(FATAL_ERROR
                 "nlohmann/json is checked out at ${LEDGERASE_NLOHMANN_JSON_ACTUAL} "
-                "but this project pins ${LEDGERASE_NLOHMANN_JSON_SHA}. Refusing to "
-                "build against an unverified dependency. Delete build/_deps and "
-                "re-run cmake to re-fetch the pinned revision.")
+                "but ${LEDGERASE_NLOHMANN_JSON_TAG} resolves to "
+                "${LEDGERASE_NLOHMANN_JSON_SHA}, which is what this project pins. "
+                "Refusing to build against an unverified dependency. Delete "
+                "build/_deps and re-run cmake to re-fetch the pinned revision.")
         endif()
     endif()
 endif()
