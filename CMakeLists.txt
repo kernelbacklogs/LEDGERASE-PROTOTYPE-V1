@@ -39,6 +39,13 @@ pkg_check_modules(LIBUUID REQUIRED uuid)
 pkg_check_modules(LIBBLKID REQUIRED blkid)
 pkg_check_modules(OPENSSL openssl)
 
+# SQLite is the evidence index. It is a system library, not fetched at
+# configure time: a database that holds an index of evidence should not pull
+# its engine from the network, and the distro package is the same engine the
+# sqlite3 command line tool uses. The evidence bundles remain the system of
+# record; this only indexes them.
+pkg_check_modules(SQLITE3 REQUIRED sqlite3)
+
 # nlohmann/json is fetched at configure time, so it is a supply-chain input to a
 # tool whose entire purpose is trustworthy erasure. It is therefore pinned to an
 # exact release tag, and the commit that tag must resolve to is checked

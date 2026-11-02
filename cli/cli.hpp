@@ -175,6 +175,31 @@ struct CliOptions {
     // what it would do and changes nothing, so a directory is never changed
     // by a command that was not asked to change it.
     bool applyMigrate = false;
+
+    // The evidence index. The evidence directory and the database are separate
+    // stores: the directory holds the bundles, the database records where they
+    // are and what the operator called them.
+    std::string databasePath;
+    std::string description;
+
+    // "evidence list" / "evidence search". Every filter is optional; a record
+    // matches when all the given ones match.
+    std::vector<std::string> evidenceArgs;
+    std::string query;
+    std::string searchOperation;
+    std::string searchStatus;
+    std::string searchTargetType;
+    std::string searchModel;
+    std::string searchDate;
+    std::string searchFrom;
+    std::string searchTo;
+    std::string sortOrder = "date-desc";
+    int page = 1;
+    int pageSize = 10;
+    // Non-interactive selection: the menu index shown by a search. It is a
+    // convenience for scripts and is never stored.
+    int selectionIndex = 0;
+    bool noInteractive = false;
 };
 
 class CliApplication {
@@ -218,6 +243,21 @@ public:
     // the record, and a bundle whose hash and chain verify before the move
     // must verify identically after it. A dry run unless asked otherwise.
     Result<void> migrateEvidence(const CliOptions& options);
+
+    // Evidence index commands. `manageEvidence` dispatches the
+    // "evidence <action>" forms and falls back to the original
+    // "evidence <job-id>" reader.
+    Result<void> manageEvidence(const CliOptions& options);
+    Result<void> evidenceList(const CliOptions& options);
+    Result<void> evidenceSearch(const CliOptions& options);
+    Result<void> evidenceShowRecord(const CliOptions& options);
+    Result<void> evidenceVerify(const CliOptions& options);
+    Result<void> evidenceFetch(const CliOptions& options);
+    Result<void> evidenceDescribe(const CliOptions& options);
+    Result<void> evidenceDatabaseCommand(const CliOptions& options);
+    Result<void> evidenceBackup(const CliOptions& options);
+    Result<void> evidenceRestore(const CliOptions& options);
+    Result<void> evidenceCheck(const CliOptions& options);
 
     // Verifies an evidence file produced by another run or another tool.
     Result<void> verifyEvidenceFile(const CliOptions& options);

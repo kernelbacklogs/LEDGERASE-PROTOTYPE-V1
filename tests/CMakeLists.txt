@@ -136,6 +136,23 @@ target_include_directories(test_file_erasure PRIVATE
 )
 add_test(NAME test_file_erasure COMMAND test_file_erasure)
 
+# The evidence index: schema creation, idempotent registration, annotations,
+# foreign keys, backup/restore and the CLI commands that search, verify and
+# fetch what the index points at. The library half always runs; the CLI half
+# is compiled in only when BUILD_CLI=ON.
+add_executable(test_evidence_db test_evidence_db.cpp)
+target_link_libraries(test_evidence_db PRIVATE ledgerase-core)
+target_include_directories(test_evidence_db PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+)
+if(TARGET ledgerase-cli)
+    target_compile_definitions(test_evidence_db PRIVATE
+        LEDGERASE_CLI_PATH="$<TARGET_FILE:ledgerase-cli>"
+    )
+    add_dependencies(test_evidence_db ledgerase-cli)
+endif()
+add_test(NAME test_evidence_db COMMAND test_evidence_db)
+
 # Every setting that was declared, parsed or documented but not enforced, shown
 # changing behaviour when it is changed. The cap, the search bound, the pass
 # count, the category filter and --identity-confirmed all failed this in one form
@@ -240,8 +257,16 @@ set_tests_properties(
     test_output_quality
     test_device_readonly
     test_folder_handling
-    test_evidence_layout
-    test_list_images
-    test_evidence_migrate
+    test_evidence_db
     PROPERTIES SKIP_RETURN_CODE 77
 )
+
+# These tests run the CLI binary and only exist when BUILD_CLI=ON.
+if(TARGET ledgerase-cli)
+    set_tests_properties(
+        test_evidence_layout
+        test_list_images
+        test_evidence_migrate
+        PROPERTIES SKIP_RETURN_CODE 77
+    )
+endif()

@@ -45,6 +45,7 @@ target_include_directories(ledgerase-core PUBLIC
     ${LIBUUID_INCLUDE_DIRS}
     ${LIBBLKID_INCLUDE_DIRS}
     ${OPENSSL_INCLUDE_DIRS}
+    ${SQLITE3_INCLUDE_DIRS}
 )
 
 # src/ is private to the library: the Linux platform header, the mock backend,
@@ -61,6 +62,7 @@ target_link_libraries(ledgerase-core PUBLIC
     ${LIBUUID_LIBRARIES}
     ${LIBBLKID_LIBRARIES}
     ${OPENSSL_LIBRARIES}
+    ${SQLITE3_LIBRARIES}
     nlohmann_json::nlohmann_json
 )
 

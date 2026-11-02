@@ -9,6 +9,7 @@
 #include "ledgerase/reporting.hpp"
 #include "ledgerase/filesystem_capability.hpp"
 #include "ledgerase/operator.hpp"
+#include "ledgerase/database.hpp"
 #include "mock/mock.hpp"
 #include "ledgerase/json_adapters.hpp"
 #include "ledgerase/ledgerase.hpp"
@@ -24,6 +25,9 @@
 #include <map>
 #include <fstream>
 #include <string_view>
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
 
 namespace ledgerase {
 namespace {
@@ -93,6 +97,316 @@ Result<void> ensureEvidenceDirectory(
 // existing record set appear to be gone. Nothing is ever written here.
 std::string legacyEvidencePath(const std::string& jobId, const std::string& directory) {
     return directory + "/" + jobId + ".json";
+}
+
+// Writes an export without following a symlink at the destination and without
+// leaving a partial file behind. The temporary file is created in the target
+// directory so the final link or rename stays on one filesystem.
+Result<void> copyEvidenceFile(const std::string& source,
+                              const std::string& destination, bool overwrite) {
+    const int input = ::open(source.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (input < 0) {
+        return Result<void>::err(ErrorCode::IO_ERROR,
+                                 "Cannot open " + source + ": " +
+                                     std::strerror(errno));
+    }
+
+    const std::filesystem::path target(destination);
+    const std::filesystem::path parent =
+        target.parent_path().empty() ? std::filesystem::path(".")
+                                     : target.parent_path();
+    static unsigned counter = 0;
+    const std::filesystem::path temporary =
+        parent / ("." + target.filename().string() + ".tmp-" +
+                  std::to_string(static_cast<long long>(::getpid())) + "-" +
+                  std::to_string(++counter));
+    const int output =
+        ::open(temporary.c_str(),
+               O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+               S_IRUSR | S_IWUSR);
+    if (output < 0) {
+        ::close(input);
+        return Result<void>::err(ErrorCode::IO_ERROR,
+                                 "Cannot create " + temporary.string() + ": " +
+                                     std::strerror(errno));
+    }
+
+    std::vector<char> buffer(64 * 1024);
+    while (true) {
+        const ssize_t n = ::read(input, buffer.data(), buffer.size());
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            const int saved = errno;
+            ::close(input);
+            ::close(output);
+            ::unlink(temporary.c_str());
+            return Result<void>::err(ErrorCode::IO_ERROR,
+                                     "Read failed: " +
+                                         std::string(std::strerror(saved)));
+        }
+        if (n == 0) {
+            break;
+        }
+        size_t written = 0;
+        while (written < static_cast<size_t>(n)) {
+            const ssize_t w = ::write(output, buffer.data() + written,
+                                      static_cast<size_t>(n) - written);
+            if (w < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                const int saved = errno;
+                ::close(input);
+                ::close(output);
+                ::unlink(temporary.c_str());
+                return Result<void>::err(
+                    ErrorCode::IO_ERROR,
+                    "Write failed: " + std::string(std::strerror(saved)));
+            }
+            written += static_cast<size_t>(w);
+        }
+    }
+    ::close(input);
+    if (::fsync(output) != 0) {
+        const int saved = errno;
+        ::close(output);
+        ::unlink(temporary.c_str());
+        return Result<void>::err(ErrorCode::IO_ERROR,
+                                 "Flush failed: " +
+                                     std::string(std::strerror(saved)));
+    }
+    ::close(output);
+
+    if (overwrite) {
+        if (::rename(temporary.c_str(), destination.c_str()) != 0) {
+            const int saved = errno;
+            ::unlink(temporary.c_str());
+            return Result<void>::err(ErrorCode::IO_ERROR,
+                                     "Cannot replace " + destination + ": " +
+                                         std::strerror(saved));
+        }
+    } else {
+        if (::link(temporary.c_str(), destination.c_str()) != 0) {
+            const int saved = errno;
+            ::unlink(temporary.c_str());
+            return Result<void>::err(ErrorCode::IO_ERROR,
+                                     "Cannot create " + destination + ": " +
+                                         std::strerror(saved));
+        }
+        ::unlink(temporary.c_str());
+    }
+    return Result<void>::success();
+}
+
+Result<std::string> sha256OfFileForIndex(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return Result<std::string>::err(ErrorCode::IO_ERROR,
+                                        "Cannot read " + path);
+    }
+    Sha256Stream stream;
+    std::vector<char> buffer(64 * 1024);
+    while (input) {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize got = input.gcount();
+        if (got > 0) {
+            stream.update(reinterpret_cast<const uint8_t*>(buffer.data()),
+                          static_cast<size_t>(got));
+        }
+    }
+    return stream.finalHex();
+}
+
+uint64_t fileSizeForIndex(const std::string& path) {
+    std::error_code ec;
+    const uintmax_t size = std::filesystem::file_size(path, ec);
+    return ec ? 0 : static_cast<uint64_t>(size);
+}
+
+std::vector<EvidenceChainRow> chainRowsFor(const std::vector<EvidenceRecord>& chain) {
+    std::vector<EvidenceChainRow> rows;
+    rows.reserve(chain.size());
+    for (const EvidenceRecord& record : chain) {
+        EvidenceChainRow row;
+        row.sequence = record.sequence;
+        row.timestamp = record.timestamp;
+        row.type = record.type;
+        row.payload = record.payload.dump();
+        row.prevHash = record.prevHash;
+        row.recordHash = record.recordHash;
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+
+EvidenceArtifactRow artifactRowFor(const std::string& path,
+                                   const std::string& type,
+                                   const std::string& formatVersion,
+                                   const std::string& createdAt,
+                                   const std::string& sha256,
+                                   const std::string& signatureKeyId,
+                                   bool signaturePresent) {
+    EvidenceArtifactRow row;
+    row.artifactType = type;
+    row.path = path;
+    row.fileSize = fileSizeForIndex(path);
+    row.sha256 = sha256;
+    row.formatVersion = formatVersion;
+    row.createdAt = createdAt;
+    row.signatureKeyId = signatureKeyId;
+    row.signaturePresent = signaturePresent;
+    return row;
+}
+
+EvidenceRegistration registrationFromSanitization(const EvidenceBundle& bundle,
+                                                   const std::string& path,
+                                                   const std::string& sha256,
+                                                   const std::string& description) {
+    EvidenceRegistration registration;
+    registration.record.jobId = bundle.jobId;
+    registration.record.description = description;
+    registration.record.operation = "drive-erasure";
+    registration.record.target = bundle.device.path;
+    registration.record.targetType = mediaTypeToString(bundle.device.mediaType);
+    registration.record.deviceModel = bundle.device.model;
+    registration.record.status =
+        bundle.execution.state == JobState::COMPLETED ? "SUCCESS" : "FAILED";
+    registration.record.createdAt = bundle.generatedAt;
+    registration.record.bundlePath = path;
+    registration.record.bundleSha256 = sha256;
+    registration.record.formatVersion = bundle.schema;
+
+    registration.job.jobId = bundle.jobId;
+    registration.job.operation = registration.record.operation;
+    registration.job.status = registration.record.status;
+    if (bundle.execution.startTime != std::chrono::system_clock::time_point{}) {
+        registration.job.startedAt = formatTimestamp(bundle.execution.startTime);
+    }
+    if (bundle.execution.endTime != std::chrono::system_clock::time_point{}) {
+        registration.job.completedAt = formatTimestamp(bundle.execution.endTime);
+    }
+    registration.job.applicationVersion = bundle.applicationVersion;
+    registration.job.evidenceFormatVersion = bundle.schema;
+    registration.job.deviceId = bundle.device.path;
+    registration.job.method = methodToString(bundle.selectedMethod);
+    registration.job.result = validationToString(bundle.validation.result);
+    registration.job.error = bundle.execution.errorMessage;
+
+    if (!bundle.device.path.empty()) {
+        EvidenceDeviceRow device;
+        device.deviceId = bundle.device.path;
+        device.deviceType = mediaTypeToString(bundle.device.mediaType);
+        device.manufacturer = bundle.device.vendor;
+        device.model = bundle.device.model;
+        device.capacityBytes = bundle.device.capacityBytes;
+        device.logicalSectorSize = bundle.device.logicalBlockSize;
+        device.identifiers = bundle.device.model;
+        registration.device = std::move(device);
+    }
+
+    registration.events = chainRowsFor(bundle.eventChain);
+    const std::string keyId =
+        bundle.signatures.empty() ? std::string() : bundle.signatures.front().keyId;
+    registration.artifacts.push_back(artifactRowFor(
+        path, "sanitization-bundle", bundle.schema, bundle.generatedAt, sha256,
+        keyId, !bundle.signatures.empty()));
+    return registration;
+}
+
+EvidenceRegistration registrationFromErase(const EraseEvidenceBundle& bundle,
+                                           const std::string& path,
+                                           const std::string& sha256,
+                                           const std::string& description) {
+    EvidenceRegistration registration;
+    registration.record.jobId = bundle.jobId;
+    registration.record.description = description;
+    registration.record.operation =
+        bundle.targetKind == "folder" ? "folder-erasure" : "file-erasure";
+    registration.record.target = bundle.targetPath;
+    registration.record.targetType = bundle.targetKind;
+    registration.record.status =
+        (bundle.filesFailed > 0 || bundle.filesRefused > 0) ? "FAILED" : "SUCCESS";
+    registration.record.createdAt = bundle.generatedAt;
+    registration.record.bundlePath = path;
+    registration.record.bundleSha256 = sha256;
+    registration.record.formatVersion = bundle.schema;
+
+    registration.job.jobId = bundle.jobId;
+    registration.job.operation = registration.record.operation;
+    registration.job.status = registration.record.status;
+    registration.job.applicationVersion = bundle.applicationVersion;
+    registration.job.evidenceFormatVersion = bundle.schema;
+    registration.job.result = registration.record.status;
+    if (bundle.filesFailed > 0 || bundle.filesRefused > 0) {
+        registration.job.error =
+            std::to_string(bundle.filesRefused) + " refused, " +
+            std::to_string(bundle.filesFailed) + " failed";
+    }
+
+    registration.events = chainRowsFor(bundle.eventChain);
+    registration.artifacts.push_back(artifactRowFor(
+        path, "erase-bundle", bundle.schema, bundle.generatedAt, sha256, "", false));
+    return registration;
+}
+
+EvidenceRegistration registrationFromCarve(const CarveEvidenceBundle& bundle,
+                                           const std::string& path,
+                                           const std::string& sha256,
+                                           const std::string& description) {
+    EvidenceRegistration registration;
+    registration.record.jobId = bundle.jobId;
+    registration.record.description = description;
+    registration.record.operation = "carving";
+    registration.record.target = bundle.source.path;
+    registration.record.targetType =
+        bundle.source.kind.empty() ? "source" : bundle.source.kind;
+    registration.record.status = "SUCCESS";
+    registration.record.createdAt = bundle.generatedAt;
+    registration.record.bundlePath = path;
+    registration.record.bundleSha256 = sha256;
+    registration.record.formatVersion = bundle.schema;
+
+    registration.job.jobId = bundle.jobId;
+    registration.job.operation = registration.record.operation;
+    registration.job.status = registration.record.status;
+    registration.job.applicationVersion = bundle.applicationVersion;
+    registration.job.evidenceFormatVersion = bundle.schema;
+    registration.job.result = registration.record.status;
+
+    registration.events = chainRowsFor(bundle.eventChain);
+    registration.artifacts.push_back(artifactRowFor(
+        path, "carve-bundle", bundle.schema, bundle.generatedAt, sha256, "", false));
+    return registration;
+}
+
+Result<EvidenceRecordRow> indexEvidence(const std::string& configuredPath,
+                                        const EvidenceRegistration& registration) {
+    const std::string path =
+        configuredPath.empty() ? defaultDatabasePath() : configuredPath;
+    auto opened = EvidenceDatabase::open(path, true);
+    if (opened.isError()) {
+        return Result<EvidenceRecordRow>::err(opened.error());
+    }
+    auto initialised = opened.value().initialize();
+    if (initialised.isError()) {
+        return Result<EvidenceRecordRow>::err(initialised.error());
+    }
+    return opened.value().registerEvidence(registration);
+}
+
+void reportIndexResult(const Result<EvidenceRecordRow>& indexed) {
+    if (indexed.isError()) {
+        std::cout << "\nWarning: the bundle was written, but the evidence index "
+                     "was not updated:\n  "
+                  << indexed.error().what() << "\n"
+                  << "  The bundle is still the record. Run 'evidence check' to "
+                     "reconcile the index.\n";
+        return;
+    }
+    std::cout << "\nEvidence ID: " << indexed.value().evidenceId
+              << "  (indexed; the bundle remains the record)\n";
 }
 
 std::string currentOperator() {
@@ -685,6 +999,26 @@ std::string CliApplication::defaultReportPath(const std::string& jobId,
 }
 
 int CliApplication::run(int argc, char* argv[]) {
+    // "--fetch EV-00129" is the shorthand for "evidence fetch EV-00129". It is
+    // rewritten here rather than handled in a second parser, so both spellings
+    // run the same implementation and cannot drift apart.
+    std::vector<std::string> shorthand;
+    std::vector<char*> shorthandPointers;
+    if (argc >= 3 && std::string(argv[1]) == "--fetch") {
+        shorthand.emplace_back(argv[0]);
+        shorthand.emplace_back("evidence");
+        shorthand.emplace_back("fetch");
+        for (int i = 2; i < argc; ++i) {
+            shorthand.emplace_back(argv[i]);
+        }
+        shorthandPointers.reserve(shorthand.size());
+        for (std::string& argument : shorthand) {
+            shorthandPointers.push_back(argument.data());
+        }
+        argc = static_cast<int>(shorthandPointers.size());
+        argv = shorthandPointers.data();
+    }
+
     if (argc < 2) {
         printUsage();
         return 1;
@@ -1022,13 +1356,62 @@ int CliApplication::run(int argc, char* argv[]) {
             options.imagesDirectory = argv[++i];
         } else if (arg == "--apply") {
             options.applyMigrate = true;
+        } else if (arg == "--description" && i + 1 < argc) {
+            options.description = argv[++i];
+        } else if (arg == "--db" && i + 1 < argc) {
+            options.databasePath = argv[++i];
+        } else if (arg == "--query" && i + 1 < argc) {
+            options.query = argv[++i];
+        } else if (arg == "--operation" && i + 1 < argc) {
+            options.searchOperation = argv[++i];
+        } else if (arg == "--status" && i + 1 < argc) {
+            options.searchStatus = argv[++i];
+        } else if (arg == "--target-type" && i + 1 < argc) {
+            options.searchTargetType = argv[++i];
+        } else if (arg == "--model" && i + 1 < argc) {
+            options.searchModel = argv[++i];
+        } else if (arg == "--date" && i + 1 < argc) {
+            options.searchDate = argv[++i];
+        } else if (arg == "--from" && i + 1 < argc) {
+            options.searchFrom = argv[++i];
+        } else if (arg == "--to" && i + 1 < argc) {
+            options.searchTo = argv[++i];
+        } else if (arg == "--sort" && i + 1 < argc) {
+            const std::string val = argv[++i];
+            if (val != "date-asc" && val != "date-desc") {
+                std::cout << "Unknown --sort: " << val
+                          << "\nValid values: date-asc, date-desc.\n";
+                return 2;
+            }
+            options.sortOrder = val;
+        } else if ((arg == "--page" || arg == "--limit" || arg == "--select") &&
+                   i + 1 < argc) {
+            const std::string val = argv[++i];
+            char* end = nullptr;
+            const long parsed = std::strtol(val.c_str(), &end, 10);
+            if (end == val.c_str() || *end != '\0' || parsed < 0) {
+                std::cout << "Unknown " << arg << ": " << val
+                          << "\nA non-negative integer is required.\n";
+                return 2;
+            }
+            if (arg == "--page") {
+                options.page = parsed < 1 ? 1 : static_cast<int>(parsed);
+            } else if (arg == "--limit") {
+                options.pageSize = parsed < 1 ? 10 : static_cast<int>(parsed);
+            } else {
+                options.selectionIndex = static_cast<int>(parsed);
+            }
+        } else if (arg == "--no-interactive") {
+            options.noInteractive = true;
         } else if (arg[0] != '-') {
             const bool wantsJob = commandTakesJobId(options.command);
-            if (options.command == "evidence" && options.jobId == "migrate") {
-                // "evidence migrate <dir>": the directory is the second
-                // positional. It is kept out of jobId so a job whose id
-                // happens to be "migrate" is still reachable.
-                if (options.migrateDirectory.empty()) {
+            if (options.command == "evidence") {
+                options.evidenceArgs.push_back(arg);
+                if (options.jobId.empty()) {
+                    options.jobId = arg;
+                }
+                if (options.evidenceArgs.size() == 2 &&
+                    options.evidenceArgs.front() == "migrate") {
                     options.migrateDirectory = arg;
                 }
             } else if (wantsJob) {
@@ -1107,7 +1490,7 @@ int CliApplication::run(int argc, char* argv[]) {
     } else if (options.command == "audit") {
         result = showAudit(options);
     } else if (options.command == "evidence") {
-        result = showEvidence(options);
+        result = manageEvidence(options);
     } else if (options.command == "verify-log") {
         result = verifyEvidenceFile(options);
     } else if (options.command == "shell") {
@@ -1172,6 +1555,21 @@ void CliApplication::printUsage() {
     std::cout << "                            A dry run unless --apply is given. The\n";
     std::cout << "                            file is moved, never re-written, so the\n";
     std::cout << "                            bytes and the hash are unchanged.\n";
+    std::cout << "  evidence list             List the latest indexed evidence records\n";
+    std::cout << "  evidence search           Search evidence by description, operation,\n";
+    std::cout << "                            target, status, date or job ID\n";
+    std::cout << "  evidence show <id>        Show one evidence record and its artifacts\n";
+    std::cout << "  evidence verify <id>      Verify the artifacts' SHA-256, bundle hash\n";
+    std::cout << "                            and chain (and signature with --public-key)\n";
+    std::cout << "  evidence fetch <id>       Verify, then copy the evidence files to an\n";
+    std::cout << "                            output directory. Also: --fetch <id>\n";
+    std::cout << "  evidence describe <id>    Set a searchable description; recorded as\n";
+    std::cout << "                            an annotation, never an edit of the bundle\n";
+    std::cout << "  evidence db init|status   Create the index, or show its state\n";
+    std::cout << "  evidence backup [dir]     Copy the database and every artifact it\n";
+    std::cout << "                            references, with hashes checked\n";
+    std::cout << "  evidence restore <dir>    Install a verified backup database\n";
+    std::cout << "  evidence check            Compare the index with the evidence store\n";
     std::cout << "  verify-log <file>         Verify an evidence file (hash, chain, signature)\n";
     std::cout << "  shell                     Interactive session\n";
     std::cout << "  version                   Show version information\n\n";
@@ -1231,6 +1629,26 @@ void CliApplication::printUsage() {
     std::cout << "  --apply                  evidence migrate only: perform the move.\n";
     std::cout << "                            Without it the command is a dry run and\n";
     std::cout << "                            changes nothing.\n";
+    std::cout << "  --db <path>              Evidence index location. Defaults to\n";
+    std::cout << "                            $LEDGERASE_DB, then\n";
+    std::cout << "                            $XDG_STATE_HOME/ledgerase/ledgerase.db.\n";
+    std::cout << "  --description <text>     Optional, searchable description of why the\n";
+    std::cout << "                            evidence was created.\n";
+    std::cout << "  --query <text>           evidence search: match description, ID,\n";
+    std::cout << "                            operation, target, model or job ID.\n";
+    std::cout << "  --operation <name>       evidence search: drive-erasure,\n";
+    std::cout << "                            file-erasure, folder-erasure or carving.\n";
+    std::cout << "  --status <status>        evidence search: SUCCESS or FAILED.\n";
+    std::cout << "  --model <text>           evidence search: device model.\n";
+    std::cout << "  --date <YYYY-MM-DD>      evidence search: one day.\n";
+    std::cout << "  --from <YYYY-MM-DD>      evidence search: earliest day.\n";
+    std::cout << "  --to <YYYY-MM-DD>        evidence search: latest day.\n";
+    std::cout << "  --page <n>               evidence list/search: page number (default 1)\n";
+    std::cout << "  --limit <n>              evidence list/search: records per page\n";
+    std::cout << "                            (default 10)\n";
+    std::cout << "  --sort <date-asc|date-desc>  evidence list/search ordering\n";
+    std::cout << "  --select <n>             choose the nth search result non-interactively\n";
+    std::cout << "  --no-interactive         never prompt for a selection\n";
     std::cout << "  --recursive, -r          erase-folder: descend into subdirectories.\n"
                  "                            Off by default: a recursive run can reach\n"
                  "                            files the operator did not enumerate.\n";
@@ -1842,6 +2260,16 @@ Result<void> CliApplication::eraseFileOrFolder(const CliOptions& options) {
         return Result<void>::err(written.error());
     }
 
+    {
+        const auto digest = sha256OfFileForIndex(evidencePath);
+        if (digest.ok()) {
+            reportIndexResult(indexEvidence(
+                options.databasePath,
+                registrationFromErase(bundle.value(), evidencePath, digest.value(),
+                                      options.description)));
+        }
+    }
+
     std::cout << "\nEvidence: " << evidencePath << "\n";
     std::cout << "  " << bundle.value().chainLength
               << " chained records, head "
@@ -2122,6 +2550,16 @@ Result<void> CliApplication::carve(const CliOptions& options) {
         carveBundle.value(), carveEvidencePath, options.force);
     if (carveWritten.isError()) {
         return Result<void>::err(carveWritten.error());
+    }
+
+    {
+        const auto digest = sha256OfFileForIndex(carveEvidencePath);
+        if (digest.ok()) {
+            reportIndexResult(indexEvidence(
+                options.databasePath,
+                registrationFromCarve(carveBundle.value(), carveEvidencePath,
+                                      digest.value(), options.description)));
+        }
     }
 
     if (options.jsonOutput) {
@@ -3085,6 +3523,16 @@ Result<void> CliApplication::sanitize(const CliOptions& options) {
         return Result<void>::err(written.error());
     }
 
+    {
+        const auto digest = sha256OfFileForIndex(evidencePath);
+        if (digest.ok()) {
+            reportIndexResult(indexEvidence(
+                options.databasePath,
+                registrationFromSanitization(evidence, evidencePath, digest.value(),
+                                             options.description)));
+        }
+    }
+
     pImpl_->printEvidenceSummary(evidence, evidencePath);
 
     // The verdict itself is already in the certificate header above, and is
@@ -3622,6 +4070,859 @@ Result<void> CliApplication::migrateEvidence(const CliOptions& options) {
             "before moving it by hand.");
     }
     return Result<void>::success();
+}
+
+// ---------------------------------------------------------------------------
+// Evidence index commands
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr int kDefaultPageSize = 10;
+
+Result<EvidenceDatabase> openIndex(const CliOptions& options, bool create) {
+    const std::string path =
+        options.databasePath.empty() ? defaultDatabasePath() : options.databasePath;
+    auto opened = EvidenceDatabase::open(path, create);
+    if (opened.isError()) {
+        return Result<EvidenceDatabase>::err(opened.error());
+    }
+    auto initialised = opened.value().initialize();
+    if (initialised.isError()) {
+        return Result<EvidenceDatabase>::err(initialised.error());
+    }
+    return Result<EvidenceDatabase>::ok(std::move(opened.value()));
+}
+
+Result<EvidenceRecordRow> resolveRecord(const EvidenceDatabase& database,
+                                        const std::string& key) {
+    if (key.rfind("EV-", 0) == 0) {
+        return database.recordForEvidenceId(key);
+    }
+    return database.recordForJob(key);
+}
+
+struct ArtifactVerification {
+    bool integrityOk = false;
+    bool signatureChecked = false;
+    bool signatureValid = false;
+    std::string detail;
+};
+
+Result<ArtifactVerification> verifyArtifactFile(const EvidenceArtifactRow& artifact,
+                                                const std::string& publicKey) {
+    std::error_code ec;
+    if (!std::filesystem::exists(artifact.path, ec)) {
+        return Result<ArtifactVerification>::err(
+            ErrorCode::DEVICE_NOT_FOUND,
+            "The evidence file is missing: " + artifact.path);
+    }
+
+    ArtifactVerification result;
+    const auto digest = sha256OfFileForIndex(artifact.path);
+    if (digest.isError()) {
+        return Result<ArtifactVerification>::err(digest.error());
+    }
+    if (digest.value() != artifact.sha256) {
+        result.detail = "SHA-256 MISMATCH: the file is not the one that was "
+                        "registered";
+        return Result<ArtifactVerification>::ok(result);
+    }
+
+    std::ifstream input(artifact.path, std::ios::binary);
+    nlohmann::json document = nlohmann::json::parse(input, nullptr, false);
+    if (document.is_discarded() || !document.is_object()) {
+        result.detail = "The file is not a JSON evidence document";
+        return Result<ArtifactVerification>::ok(result);
+    }
+    const std::string schema = document.value("schema", "");
+
+    if (schema.find("evidence_bundle") != std::string::npos) {
+        auto checked = publicKey.empty()
+                           ? EvidenceVerifier::verifyStructure(artifact.path)
+                           : EvidenceVerifier::verify(artifact.path, publicKey);
+        if (checked.isError()) {
+            return Result<ArtifactVerification>::err(checked.error());
+        }
+        const EvidenceVerification& verification = checked.value();
+        result.integrityOk = verification.schemaRecognised &&
+                             verification.canonicalHashMatches &&
+                             verification.chainConsistent;
+        if (!publicKey.empty()) {
+            result.signatureChecked = verification.signaturePresent;
+            result.signatureValid =
+                verification.signaturePresent && verification.signatureValid;
+            if (!verification.signaturePresent) {
+                result.detail = "no signature present";
+            } else if (!verification.signatureValid) {
+                result.detail = "signature INVALID";
+            }
+        }
+    } else if (schema.find("erase_bundle") != std::string::npos) {
+        auto checked = EraseEvidenceVerifier::verifyStructure(artifact.path);
+        if (checked.isError()) {
+            return Result<ArtifactVerification>::err(checked.error());
+        }
+        result.integrityOk = checked.value().schemaRecognised &&
+                             checked.value().canonicalHashMatches &&
+                             checked.value().chainConsistent;
+        result.detail = "file-erasure records are hash verified, not signed";
+    } else if (schema.find("carve_bundle") != std::string::npos) {
+        auto checked = CarveEvidenceVerifier::verifyStructure(artifact.path);
+        if (checked.isError()) {
+            return Result<ArtifactVerification>::err(checked.error());
+        }
+        result.integrityOk = checked.value().schemaRecognised &&
+                             checked.value().canonicalHashMatches &&
+                             checked.value().chainConsistent;
+        result.detail = "carve records are hash verified, not signed";
+    } else {
+        result.detail = "Unrecognised evidence schema: " + schema;
+        return Result<ArtifactVerification>::ok(result);
+    }
+
+    if (result.integrityOk && result.detail.empty()) {
+        result.detail = "content is unaltered";
+    }
+    return Result<ArtifactVerification>::ok(result);
+}
+
+std::string datePart(const std::string& timestamp) {
+    return timestamp.size() >= 10 ? timestamp.substr(0, 10) : timestamp;
+}
+
+void printEvidenceTable(const std::vector<EvidenceRecordRow>& records, int total,
+                        int page, int pageSize, bool newestFirst) {
+    const int start = total == 0 ? 0 : (page - 1) * pageSize + 1;
+    const int end = (page - 1) * pageSize + static_cast<int>(records.size());
+    std::cout << "LEDGERASE EVIDENCE RECORDS\n\n";
+    if (total == 0) {
+        std::cout << "No evidence records match.\n";
+        std::cout << "Use 'ledgerase-cli evidence search --query <text>' to widen "
+                     "the search.\n";
+        return;
+    }
+    std::cout << "Showing " << start << "-" << end << " of " << total
+              << " record(s), " << (newestFirst ? "newest first" : "oldest first")
+              << "\n\n";
+    std::printf("%-10s %-12s %-16s %-24s %-8s  %s\n", "ID", "DATE", "OPERATION",
+                "TARGET", "STATUS", "DESCRIPTION");
+    std::cout << std::string(100, '-') << "\n";
+    for (const EvidenceRecordRow& record : records) {
+        std::printf("%-10s %-12s %-16s %-24s %-8s  %s\n",
+                    record.evidenceId.c_str(), datePart(record.createdAt).c_str(),
+                    record.operation.c_str(), record.target.c_str(),
+                    record.status.c_str(),
+                    record.description.empty() ? "-" : record.description.c_str());
+    }
+    const int pages = (total + pageSize - 1) / pageSize;
+    if (page < pages) {
+        std::cout << "\nUse --page " << (page + 1) << " to view more records.\n";
+    }
+    if (page > 1) {
+        std::cout << "Use --page " << (page - 1) << " to go back.\n";
+    }
+    std::cout << "Use 'ledgerase-cli evidence search' to find a specific record.\n";
+}
+
+void printRecordDetail(const EvidenceRecordRow& record,
+                       const std::vector<EvidenceArtifactRow>& artifacts) {
+    std::cout << "SELECTED EVIDENCE: " << record.evidenceId << "\n\n";
+    std::cout << "Description: " << (record.description.empty() ? "-"
+                                                               : record.description)
+              << "\n";
+    std::cout << "Operation:   " << record.operation << "\n";
+    std::cout << "Target:      " << record.target << " (" << record.targetType
+              << ")\n";
+    std::cout << "Date:        " << datePart(record.createdAt) << "\n";
+    std::cout << "Status:      " << record.status << "\n";
+    std::cout << "Job ID:      " << record.jobId << "\n";
+    std::cout << "Bundle:      " << record.bundlePath << "\n";
+    std::cout << "SHA-256:     " << record.bundleSha256 << "\n";
+    std::cout << "\nArtifacts:\n";
+    for (const EvidenceArtifactRow& artifact : artifacts) {
+        std::cout << "  - " << artifact.artifactType << ": " << artifact.path
+                  << " (" << artifact.fileSize << " bytes, sha256 "
+                  << artifact.sha256.substr(0, 16) << "...)\n";
+        if (artifact.signaturePresent) {
+            std::cout << "    signed with key " << artifact.signatureKeyId << "\n";
+        }
+    }
+}
+
+} // namespace
+
+Result<void> CliApplication::manageEvidence(const CliOptions& options) {
+    const std::string action =
+        options.evidenceArgs.empty() ? std::string() : options.evidenceArgs.front();
+
+    if (action == "migrate") {
+        return migrateEvidence(options);
+    }
+    if (action == "list") {
+        return evidenceList(options);
+    }
+    if (action == "search") {
+        return evidenceSearch(options);
+    }
+    if (action == "show") {
+        return evidenceShowRecord(options);
+    }
+    if (action == "verify") {
+        return evidenceVerify(options);
+    }
+    if (action == "fetch") {
+        return evidenceFetch(options);
+    }
+    if (action == "describe") {
+        return evidenceDescribe(options);
+    }
+    if (action == "db") {
+        return evidenceDatabaseCommand(options);
+    }
+    if (action == "backup") {
+        return evidenceBackup(options);
+    }
+    if (action == "restore") {
+        return evidenceRestore(options);
+    }
+    if (action == "check") {
+        return evidenceCheck(options);
+    }
+    if (action.empty()) {
+        return Result<void>::err(
+            ErrorCode::INVALID_ARGUMENT, "An evidence action is required",
+            "Usage: ledgerase-cli evidence list|search|show|verify|fetch|describe|"
+            "db|backup|restore|check [arguments]");
+    }
+    // Backwards compatibility: "evidence <job-id>" still shows a bundle.
+    return showEvidence(options);
+}
+
+Result<void> CliApplication::evidenceList(const CliOptions& options) {
+    auto database = openIndex(options, false);
+    if (database.isError()) {
+        return Result<void>::err(database.error());
+    }
+    const int pageSize = options.pageSize > 0 ? options.pageSize : kDefaultPageSize;
+    const int offset = (options.page - 1) * pageSize;
+    const bool newestFirst = options.sortOrder != "date-asc";
+    auto page = database.value().list(pageSize, offset, newestFirst);
+    if (page.isError()) {
+        return Result<void>::err(page.error());
+    }
+    if (options.jsonOutput) {
+        nlohmann::json output;
+        output["total"] = page.value().total;
+        output["page"] = options.page;
+        output["records"] = nlohmann::json::array();
+        for (const EvidenceRecordRow& record : page.value().records) {
+            output["records"].push_back({{"evidence_id", record.evidenceId},
+                                         {"description", record.description},
+                                         {"operation", record.operation},
+                                         {"target", record.target},
+                                         {"status", record.status},
+                                         {"created_at", record.createdAt}});
+        }
+        std::cout << output.dump(2) << "\n";
+        return Result<void>::success();
+    }
+    printEvidenceTable(page.value().records, page.value().total, options.page,
+                       pageSize, newestFirst);
+    return Result<void>::success();
+}
+
+Result<void> CliApplication::evidenceSearch(const CliOptions& options) {
+    auto database = openIndex(options, false);
+    if (database.isError()) {
+        return Result<void>::err(database.error());
+    }
+    EvidenceSearchQuery query;
+    query.query = options.query;
+    query.operation = options.searchOperation;
+    query.status = options.searchStatus;
+    query.targetType = options.searchTargetType;
+    query.deviceModel = options.searchModel;
+    query.date = options.searchDate;
+    query.fromDate = options.searchFrom;
+    query.toDate = options.searchTo;
+
+    const int pageSize = options.pageSize > 0 ? options.pageSize : kDefaultPageSize;
+    const int offset = (options.page - 1) * pageSize;
+    const bool newestFirst = options.sortOrder != "date-asc";
+    auto page = database.value().search(query, pageSize, offset, newestFirst);
+    if (page.isError()) {
+        return Result<void>::err(page.error());
+    }
+
+    if (options.jsonOutput) {
+        nlohmann::json output;
+        output["total"] = page.value().total;
+        output["records"] = nlohmann::json::array();
+        for (const EvidenceRecordRow& record : page.value().records) {
+            output["records"].push_back({{"evidence_id", record.evidenceId},
+                                         {"description", record.description},
+                                         {"operation", record.operation},
+                                         {"target", record.target},
+                                         {"status", record.status},
+                                         {"created_at", record.createdAt}});
+        }
+        std::cout << output.dump(2) << "\n";
+        return Result<void>::success();
+    }
+
+    if (page.value().total == 0) {
+        std::cout << "No evidence records match the search.\n";
+        return Result<void>::success();
+    }
+
+    if (page.value().records.size() == 1) {
+        auto artifacts =
+            database.value().artifactsFor(page.value().records.front().evidenceId);
+        if (artifacts.isError()) {
+            return Result<void>::err(artifacts.error());
+        }
+        printRecordDetail(page.value().records.front(), artifacts.value());
+        return Result<void>::success();
+    }
+
+    std::cout << page.value().total << " MATCHING EVIDENCE RECORD(S)\n\n";
+    for (size_t i = 0; i < page.value().records.size(); ++i) {
+        const EvidenceRecordRow& record = page.value().records[i];
+        std::cout << "[" << (i + 1) << "] " << record.evidenceId << " - "
+                  << (record.description.empty() ? "(no description)"
+                                                 : record.description)
+                  << "\n";
+        std::cout << "    " << datePart(record.createdAt) << " | "
+                  << record.target << " | " << record.status << "\n\n";
+    }
+
+    const auto select = [&](int index) -> Result<void> {
+        if (index < 1 ||
+            index > static_cast<int>(page.value().records.size())) {
+            return Result<void>::err(
+                ErrorCode::INVALID_ARGUMENT,
+                "Selection out of range: " + std::to_string(index),
+                "Choose a number from the list.");
+        }
+        const EvidenceRecordRow& record = page.value().records[index - 1];
+        auto artifacts = database.value().artifactsFor(record.evidenceId);
+        if (artifacts.isError()) {
+            return Result<void>::err(artifacts.error());
+        }
+        printRecordDetail(record, artifacts.value());
+        if (options.selectionIndex > 0 || options.noInteractive ||
+            !::isatty(STDIN_FILENO) || !::isatty(STDOUT_FILENO)) {
+            return Result<void>::success();
+        }
+        std::cout << "\n1. View details\n2. Verify integrity\n3. Fetch evidence\n"
+                     "4. Back\n\nChoose: ";
+        std::string choice;
+        if (!std::getline(std::cin, choice)) {
+            return Result<void>::success();
+        }
+        CliOptions selected = options;
+        selected.evidenceArgs = {"show", record.evidenceId};
+        if (choice == "1") {
+            return evidenceShowRecord(selected);
+        }
+        if (choice == "2") {
+            selected.evidenceArgs = {"verify", record.evidenceId};
+            return evidenceVerify(selected);
+        }
+        if (choice == "3") {
+            selected.evidenceArgs = {"fetch", record.evidenceId};
+            return evidenceFetch(selected);
+        }
+        return Result<void>::success();
+    };
+
+    if (options.selectionIndex > 0) {
+        return select(options.selectionIndex);
+    }
+    if (options.noInteractive || !::isatty(STDIN_FILENO) ||
+        !::isatty(STDOUT_FILENO)) {
+        std::cout << "Select with 'ledgerase-cli evidence show <evidence-id>', or "
+                     "pass --select <number>.\n";
+        return Result<void>::success();
+    }
+
+    std::cout << "Select a record: " << std::flush;
+    std::string line;
+    if (!std::getline(std::cin, line) || line.empty()) {
+        return Result<void>::success();
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(line.c_str(), &end, 10);
+    if (end == line.c_str() || *end != '\0') {
+        return Result<void>::err(ErrorCode::INVALID_ARGUMENT,
+                                 "Not a selection number: " + line);
+    }
+    return select(static_cast<int>(parsed));
+}
+
+Result<void> CliApplication::evidenceShowRecord(const CliOptions& options) {
+    if (options.evidenceArgs.size() < 2) {
+        return Result<void>::err(
+            ErrorCode::INVALID_ARGUMENT, "An evidence ID is required",
+            "Usage: ledgerase-cli evidence show EV-00001");
+    }
+    auto database = openIndex(options, false);
+    if (database.isError()) {
+        return Result<void>::err(database.error());
+    }
+    auto record = resolveRecord(database.value(), options.evidenceArgs[1]);
+    if (record.isError()) {
+        return Result<void>::err(record.error());
+    }
+    auto artifacts = database.value().artifactsFor(record.value().evidenceId);
+    if (artifacts.isError()) {
+        return Result<void>::err(artifacts.error());
+    }
+    if (options.jsonOutput) {
+        nlohmann::json output = {
+            {"evidence_id", record.value().evidenceId},
+            {"description", record.value().description},
+            {"operation", record.value().operation},
+            {"target", record.value().target},
+            {"target_type", record.value().targetType},
+            {"status", record.value().status},
+            {"created_at", record.value().createdAt},
+            {"job_id", record.value().jobId},
+            {"bundle_path", record.value().bundlePath},
+            {"bundle_sha256", record.value().bundleSha256},
+            {"artifacts", nlohmann::json::array()}};
+        for (const EvidenceArtifactRow& artifact : artifacts.value()) {
+            output["artifacts"].push_back(
+                {{"type", artifact.artifactType},
+                 {"path", artifact.path},
+                 {"file_size", artifact.fileSize},
+                 {"sha256", artifact.sha256},
+                 {"signature_present", artifact.signaturePresent}});
+        }
+        std::cout << output.dump(2) << "\n";
+        return Result<void>::success();
+    }
+    printRecordDetail(record.value(), artifacts.value());
+    return Result<void>::success();
+}
+
+Result<void> CliApplication::evidenceVerify(const CliOptions& options) {
+    if (options.evidenceArgs.size() < 2) {
+        return Result<void>::err(
+            ErrorCode::INVALID_ARGUMENT, "An evidence ID is required",
+            "Usage: ledgerase-cli evidence verify EV-00001 [--public-key <pub.pem>]");
+    }
+    auto database = openIndex(options, false);
+    if (database.isError()) {
+        return Result<void>::err(database.error());
+    }
+    auto record = resolveRecord(database.value(), options.evidenceArgs[1]);
+    if (record.isError()) {
+        return Result<void>::err(record.error());
+    }
+    auto artifacts = database.value().artifactsFor(record.value().evidenceId);
+    if (artifacts.isError()) {
+        return Result<void>::err(artifacts.error());
+    }
+    if (artifacts.value().empty()) {
+        return Result<void>::err(
+            ErrorCode::VERIFICATION_FAILED,
+            "No artifacts are registered for " + record.value().evidenceId,
+            "Run 'ledgerase-cli evidence check'.");
+    }
+
+    bool allOk = true;
+    bool anySignatureChecked = false;
+    bool anySignatureInvalid = false;
+    for (const EvidenceArtifactRow& artifact : artifacts.value()) {
+        auto checked = verifyArtifactFile(artifact, options.publicKeyFile);
+        if (checked.isError()) {
+            allOk = false;
+            std::cout << "  FAILED  " << artifact.path << "\n            "
+                      << checked.error().what() << "\n";
+            continue;
+        }
+        anySignatureChecked = anySignatureChecked || checked.value().signatureChecked;
+        anySignatureInvalid =
+            anySignatureInvalid ||
+            (checked.value().signatureChecked && !checked.value().signatureValid);
+        const bool signatureMissingButRequested =
+            !options.publicKeyFile.empty() && !checked.value().signatureChecked;
+        if (!checked.value().integrityOk || signatureMissingButRequested) {
+            allOk = false;
+        }
+        std::cout << "  " << (checked.value().integrityOk ? "OK    " : "FAILED")
+                  << "  " << artifact.path << "\n            "
+                  << checked.value().detail << "\n";
+    }
+
+    VerificationResultRow row;
+    row.evidenceId = record.value().evidenceId;
+    row.jobId = record.value().jobId;
+    row.timestamp = formatTimestamp(std::chrono::system_clock::now());
+    row.status = allOk ? "VERIFIED" : "FAILED";
+    row.verifiedHash = record.value().bundleSha256;
+    row.signatureStatus = anySignatureChecked
+                              ? (anySignatureInvalid ? "invalid" : "valid")
+                              : "not checked";
+    (void)database.value().recordVerification(row);
+
+    std::cout << "\n" << record.value().evidenceId << ": "
+              << (allOk ? "verified" : "NOT verified") << "\n";
+    if (allOk) {
+        std::cout << "The artifact bytes match their recorded SHA-256 and each "
+                     "bundle's own hash and chain verify.\n";
+        if (!anySignatureChecked) {
+            std::cout << "Signature: not checked (pass --public-key to check it). "
+                         "Hash verification is integrity, not authentication.\n";
+        }
+    }
+    if (!allOk) {
+        return Result<void>::err(
+            ErrorCode::VERIFICATION_FAILED,
+            "Evidence " + record.value().evidenceId + " did not verify",
+            "Do not treat the files as authentic. Inspect the paths above.");
+    }
+    return Result<void>::success();
+}
+
+Result<void> CliApplication::evidenceFetch(const CliOptions& options) {
+    if (options.evidenceArgs.size() < 2) {
+        return Result<void>::err(
+            ErrorCode::INVALID_ARGUMENT, "An evidence ID is required",
+            "Usage: ledgerase-cli evidence fetch EV-00001 [--output <dir>]");
+    }
+    auto database = openIndex(options, false);
+    if (database.isError()) {
+        return Result<void>::err(database.error());
+    }
+    auto record = resolveRecord(database.value(), options.evidenceArgs[1]);
+    if (record.isError()) {
+        return Result<void>::err(record.error());
+    }
+    auto artifacts = database.value().artifactsFor(record.value().evidenceId);
+    if (artifacts.isError()) {
+        return Result<void>::err(artifacts.error());
+    }
+    if (artifacts.value().empty()) {
+        return Result<void>::err(ErrorCode::DEVICE_NOT_FOUND,
+                                 "No artifacts are registered for " +
+                                     record.value().evidenceId);
+    }
+
+    const std::string destination =
+        options.outputFile.empty()
+            ? "evidence-export/" + record.value().evidenceId
+            : options.outputFile;
+
+    // Verify before exporting, and check collisions first, so a failed run does
+    // not leave a half-exported set behind.
+    bool signatureChecked = false;
+    bool signatureInvalid = false;
+    bool signatureVerifiable = false;
+    for (const EvidenceArtifactRow& artifact : artifacts.value()) {
+        auto checked = verifyArtifactFile(artifact, options.publicKeyFile);
+        if (checked.isError()) {
+            return Result<void>::err(
+                ErrorCode::VERIFICATION_FAILED,
+                std::string("Refusing to export: ") + checked.error().what(),
+                "The original evidence file is untouched. Repair or restore it "
+                "before fetching.");
+        }
+        if (!checked.value().integrityOk) {
+            return Result<void>::err(
+                ErrorCode::VERIFICATION_FAILED,
+                "Refusing to export " + artifact.path + ": " +
+                    checked.value().detail);
+        }
+        signatureVerifiable = signatureVerifiable || artifact.signaturePresent;
+        if (!options.publicKeyFile.empty()) {
+            signatureChecked = signatureChecked || checked.value().signatureChecked;
+            signatureInvalid = signatureInvalid ||
+                               (checked.value().signatureChecked &&
+                                !checked.value().signatureValid);
+        }
+    }
+    if (signatureInvalid) {
+        return Result<void>::err(
+            ErrorCode::VERIFICATION_FAILED,
+            "Refusing to export " + record.value().evidenceId +
+                ": the signature did not verify",
+            "The original evidence file is untouched. Check the public key and "
+            "the bundle before fetching.");
+    }
+
+    std::error_code ec;
+    const std::filesystem::path root(destination);
+    if (!std::filesystem::exists(root, ec)) {
+        std::filesystem::create_directories(root, ec);
+        if (ec) {
+            return Result<void>::err(ErrorCode::IO_ERROR,
+                                     "Cannot create " + destination + ": " +
+                                         ec.message());
+        }
+        std::filesystem::permissions(root, std::filesystem::perms::owner_all,
+                                     std::filesystem::perm_options::replace, ec);
+    }
+    if (!std::filesystem::is_directory(root, ec)) {
+        return Result<void>::err(ErrorCode::INVALID_ARGUMENT,
+                                 destination + " is not a directory");
+    }
+
+    for (const EvidenceArtifactRow& artifact : artifacts.value()) {
+        const std::filesystem::path target =
+            root / std::filesystem::path(artifact.path).filename();
+        if (std::filesystem::exists(target, ec) && !options.force) {
+            return Result<void>::err(
+                ErrorCode::IO_ERROR,
+                "Refusing to overwrite " + target.string(),
+                "Choose another --output directory, or use --force.");
+        }
+    }
+
+    for (const EvidenceArtifactRow& artifact : artifacts.value()) {
+        const std::filesystem::path target =
+            root / std::filesystem::path(artifact.path).filename();
+        auto copied = copyEvidenceFile(artifact.path, target.string(), options.force);
+        if (copied.isError()) {
+            return Result<void>::err(copied.error());
+        }
+    }
+
+    VerificationResultRow row;
+    row.evidenceId = record.value().evidenceId;
+    row.jobId = record.value().jobId;
+    row.timestamp = formatTimestamp(std::chrono::system_clock::now());
+    row.status = "VERIFIED";
+    row.verifiedHash = record.value().bundleSha256;
+    row.signatureStatus = signatureChecked
+                              ? (signatureInvalid ? "invalid" : "valid")
+                              : (signatureVerifiable ? "not checked" : "not supported");
+    (void)database.value().recordVerification(row);
+
+    std::cout << "Retrieved " << record.value().evidenceId << " to " << destination
+              << "\n";
+    std::cout << "  Integrity: verified (SHA-256 and bundle hash/chain)\n";
+    if (!options.publicKeyFile.empty()) {
+        if (signatureChecked) {
+            std::cout << "  Signature: valid\n";
+        } else {
+            std::cout << "  Signature: not verifiable for this record type\n";
+        }
+    } else {
+        std::cout << "  Signature: not checked (pass --public-key to check). "
+                     "Integrity is not authentication.\n";
+    }
+    std::cout << "  The original files were not moved or modified.\n";
+    return Result<void>::success();
+}
+
+Result<void> CliApplication::evidenceDescribe(const CliOptions& options) {
+    if (options.evidenceArgs.size() < 2) {
+        return Result<void>::err(
+            ErrorCode::INVALID_ARGUMENT, "An evidence ID is required",
+            "Usage: ledgerase-cli evidence describe EV-00001 --description \"text\"");
+    }
+    if (options.description.empty()) {
+        return Result<void>::err(ErrorCode::INVALID_ARGUMENT,
+                                 "--description is required",
+                                 "The description is optional metadata, but this "
+                                 "command exists to set it.");
+    }
+    auto database = openIndex(options, false);
+    if (database.isError()) {
+        return Result<void>::err(database.error());
+    }
+    auto record = resolveRecord(database.value(), options.evidenceArgs[1]);
+    if (record.isError()) {
+        return Result<void>::err(record.error());
+    }
+    auto annotated = database.value().annotate(record.value().evidenceId,
+                                               options.description, currentOperator());
+    if (annotated.isError()) {
+        return Result<void>::err(annotated.error());
+    }
+    std::cout << record.value().evidenceId
+              << ": description updated. The change is recorded as an annotation; "
+                 "the bundle and its hash are unchanged.\n";
+    return Result<void>::success();
+}
+
+Result<void> CliApplication::evidenceDatabaseCommand(const CliOptions& options) {
+    const std::string sub = options.evidenceArgs.size() > 1
+                                ? options.evidenceArgs[1]
+                                : std::string("status");
+    if (sub == "init") {
+        auto database = openIndex(options, true);
+        if (database.isError()) {
+            return Result<void>::err(database.error());
+        }
+        auto status = database.value().status();
+        if (status.isError()) {
+            return Result<void>::err(status.error());
+        }
+        std::cout << "Evidence database initialised.\n";
+        std::cout << "  Path:   " << status.value().path << "\n";
+        std::cout << "  Schema: " << status.value().schemaVersion << "\n";
+        std::cout << "  Mode:   " << status.value().journalMode << "\n";
+        return Result<void>::success();
+    }
+    if (sub != "status") {
+        return Result<void>::err(ErrorCode::INVALID_ARGUMENT,
+                                 "Unknown evidence db action: " + sub,
+                                 "Use 'evidence db init' or 'evidence db status'.");
+    }
+    auto database = openIndex(options, false);
+    if (database.isError()) {
+        return Result<void>::err(database.error());
+    }
+    auto status = database.value().status();
+    if (status.isError()) {
+        return Result<void>::err(status.error());
+    }
+    std::cout << "LEDGERASE EVIDENCE DATABASE\n\n";
+    std::cout << "  Path:          " << status.value().path << "\n";
+    std::cout << "  Exists:        " << (status.value().exists ? "yes" : "no") << "\n";
+    std::cout << "  Schema:        " << status.value().schemaVersion << "\n";
+    std::cout << "  Journal mode:  " << status.value().journalMode << "\n";
+    std::cout << "  Size:          " << status.value().sizeBytes << " bytes\n";
+    std::cout << "  Evidence:      " << status.value().evidenceCount << "\n";
+    std::cout << "  Jobs:          " << status.value().jobCount << "\n";
+    std::cout << "  Artifacts:     " << status.value().artifactCount << "\n";
+    std::cout << "  Verifications: " << status.value().verificationCount << "\n";
+    std::cout << "  Migrations:    " << status.value().migrationCount << "\n";
+    std::cout << "\nThe database is an index. The bundles it points to are the "
+                 "record.\n";
+    return Result<void>::success();
+}
+
+Result<void> CliApplication::evidenceBackup(const CliOptions& options) {
+    auto database = openIndex(options, false);
+    if (database.isError()) {
+        return Result<void>::err(database.error());
+    }
+    const std::string destination =
+        !options.outputFile.empty()
+            ? options.outputFile
+            : (options.evidenceArgs.size() > 1
+                   ? options.evidenceArgs[1]
+                   : (options.databasePath.empty() ? defaultDatabasePath()
+                                                   : options.databasePath) +
+                         ".backup");
+    auto backed = database.value().backupTo(destination, options.force);
+    if (backed.isError()) {
+        return Result<void>::err(backed.error());
+    }
+    std::cout << "Evidence backup written to " << destination << "\n";
+    std::cout << "  It contains the SQLite database and a copy of every artifact "
+                 "it references.\n";
+    return Result<void>::success();
+}
+
+Result<void> CliApplication::evidenceRestore(const CliOptions& options) {
+    if (options.evidenceArgs.size() < 2) {
+        return Result<void>::err(
+            ErrorCode::INVALID_ARGUMENT, "A backup directory is required",
+            "Usage: ledgerase-cli evidence restore <backup-dir> [--db <path>]");
+    }
+    const std::string destination =
+        options.databasePath.empty() ? defaultDatabasePath() : options.databasePath;
+    auto restored =
+        EvidenceDatabase::restoreFrom(options.evidenceArgs[1], destination,
+                                      options.force);
+    if (restored.isError()) {
+        return Result<void>::err(restored.error());
+    }
+    std::cout << "Evidence database restored to " << destination << "\n";
+    std::cout << "  The backup manifest and every artifact copy were verified "
+                 "before the database was installed.\n";
+    return Result<void>::success();
+}
+
+Result<void> CliApplication::evidenceCheck(const CliOptions& options) {
+    auto database = openIndex(options, false);
+    if (database.isError()) {
+        return Result<void>::err(database.error());
+    }
+    auto report = database.value().consistency(
+        [&](const EvidenceArtifactRow& artifact) -> Result<void> {
+            auto checked = verifyArtifactFile(artifact, options.publicKeyFile);
+            if (checked.isError()) {
+                return Result<void>::err(checked.error());
+            }
+            if (!checked.value().integrityOk) {
+                return Result<void>::err(ErrorCode::VERIFICATION_FAILED,
+                                         checked.value().detail);
+            }
+            return Result<void>::success();
+        });
+    if (report.isError()) {
+        return Result<void>::err(report.error());
+    }
+
+    std::vector<ConsistencyFinding> findings = report.value().findings;
+
+    // Orphan bundles: files in the evidence store that the index does not know.
+    std::vector<std::string> directories = {pImpl_->evidenceDirectory,
+                                            defaultEvidenceDirectory()};
+    std::vector<std::string> seen;
+    for (const std::string& directory : directories) {
+        for (const std::string& candidate :
+             {directory + "/" + kAuditSubdirectory, directory}) {
+            std::error_code ec;
+            if (!std::filesystem::is_directory(candidate, ec)) {
+                continue;
+            }
+            for (const auto& entry :
+                 std::filesystem::directory_iterator(candidate, ec)) {
+                if (!entry.is_regular_file() || entry.path().extension() != ".json") {
+                    continue;
+                }
+                const std::string path = entry.path().string();
+                if (std::find(seen.begin(), seen.end(), path) != seen.end()) {
+                    continue;
+                }
+                seen.push_back(path);
+                std::ifstream input(path, std::ios::binary);
+                nlohmann::json document =
+                    nlohmann::json::parse(input, nullptr, false);
+                if (document.is_discarded() || !document.is_object()) {
+                    continue;
+                }
+                const std::string jobId = document.value("job_id", "");
+                if (jobId.empty()) {
+                    continue;
+                }
+                if (database.value().recordForJob(jobId).isError()) {
+                    findings.push_back(
+                        {"", "orphan-file",
+                         "The bundle " + path +
+                             " is not registered in the evidence index"});
+                }
+            }
+        }
+    }
+
+    std::cout << "EVIDENCE CONSISTENCY CHECK\n\n";
+    std::cout << "Artifacts checked: " << report.value().checked << "\n";
+    if (findings.empty()) {
+        std::cout << "No inconsistencies found.\n";
+        std::cout << "Every registered artifact exists, matches its recorded "
+                     "SHA-256, and its bundle hash and chain verify.\n";
+        return Result<void>::success();
+    }
+    std::cout << findings.size() << " finding(s):\n\n";
+    for (const ConsistencyFinding& finding : findings) {
+        std::cout << "  [" << finding.kind << "]"
+                  << (finding.evidenceId.empty() ? "" : " " + finding.evidenceId)
+                  << "\n    " << finding.detail << "\n";
+    }
+    return Result<void>::err(
+        ErrorCode::OPERATION_FAILED,
+        std::to_string(findings.size()) + " consistency finding(s)",
+        "Missing or altered artifacts are evidence problems, not just index "
+        "problems. Do not treat the affected records as verified.");
 }
 
 // Renders the evidence bundle for a job, optionally signing it and writing it to
