@@ -46,31 +46,11 @@ pkg_check_modules(OPENSSL openssl)
 # record; this only indexes them.
 pkg_check_modules(SQLITE3 REQUIRED sqlite3)
 
-# nlohmann/json is fetched at configure time, so it is a supply-chain input to a
-# tool whose entire purpose is trustworthy erasure. It is therefore pinned to an
-# exact release tag, and the commit that tag must resolve to is checked
-# afterwards.
-#
-# The tag is a release tag, not a branch: a branch moves, and this build would
-# then silently compile against whatever it points at. The tag is named
-# exactly, and the commit it resolves to is verified below, so neither a moved
-# tag nor an upstream mistake can change what is compiled in unnoticed.
-#
-# The version is v3.12.0 because the previous pin, v3.11.2, declares
-# cmake_minimum_required(VERSION 3.1). CMake 4.x removed compatibility with
-# anything below 3.5, so v3.11.2 cannot be configured by a current CMake
-# without -DCMAKE_POLICY_VERSION_MINIMUM=3.5. v3.12.0 declares
-# cmake_minimum_required(VERSION 3.5...4.0) and configures on CMake 4.x
-# unaided.
-#
-# The first configure of a pinned FetchContent still needs network access. To
-# verify what was actually checked out rather than trusting the pin alone, run
-#
-#   git -C build/_deps/nlohmann_json-src rev-parse HEAD
-#
-# and confirm it prints the SHA below. GIT_SHALLOW is not used, because a pinned
-# commit is not reachable by depth-limited clone unless it happens to be a branch
-# tip.
+# Pin nlohmann/json to an immutable commit to prevent tag movement.
+# Verify the checked-out commit after the first configure:
+# git -C build/_deps/nlohmann_json-src rev-parse HEAD
+# GIT_SHALLOW is disabled because a pinned commit may not be
+# available through a depth-limited clone.
 include(FetchContent)
 set(LEDGERASE_NLOHMANN_JSON_TAG "v3.12.0" CACHE STRING
     "Pinned nlohmann/json release tag. Update deliberately, never automatically.")

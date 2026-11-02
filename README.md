@@ -27,7 +27,7 @@ The current prototype provides:
 - Hash-chained evidence records
 - Persistent sanitization evidence and audit reporting
 - Durable SQLite evidence index with permanent Evidence IDs
-- Searchable evidence descriptions with change history
+- Searchable evidence descriptions; annotation history is stored but not viewable through the CLI
 - Verify and fetch evidence by ID, with integrity checks before export
 - Evidence index backup, restore and consistency checking
 - Signature-based forensic file carving
@@ -69,40 +69,26 @@ sudo ./build/bin/ledgerase-cli sanitize /dev/sdX --assurance clear
 
 # 6. Get CLI Help
 ./build/bin/ledgerase-cli --help
+```
 
 Warning: Sanitization is destructive. Always verify the target device before executing the operation.
 
 # Evidence Management
 
-Every sanitization, erasure and carving run writes a verifiable evidence bundle.
-LEDGERASE also indexes those bundles in a local SQLite database so they can be
-found by a permanent ID, a description or the operation that produced them. The
-bundle remains the record; the database is an index of it.
+Evidence bundles remain the source of truth; when registration succeeds, the SQLite index assigns permanent IDs and supports description search.
 
 ```bash
-# Create and inspect the index.
 ./build/bin/ledgerase-cli evidence db init
-./build/bin/ledgerase-cli evidence db status
-
-# Find evidence.
 ./build/bin/ledgerase-cli evidence list
 ./build/bin/ledgerase-cli evidence search --query "college lab"
-./build/bin/ledgerase-cli evidence search --operation drive-erasure --status SUCCESS
-
-# Describe, verify and retrieve.
-./build/bin/ledgerase-cli evidence show EV-00001
-./build/bin/ledgerase-cli evidence describe EV-00001 --description "Lab USB, rack 4"
+./build/bin/ledgerase-cli evidence describe EV-00001 --description "Lab USB"
 ./build/bin/ledgerase-cli evidence verify EV-00001
 ./build/bin/ledgerase-cli evidence fetch EV-00001 --output ./exported
-./build/bin/ledgerase-cli --fetch EV-00001 --output ./exported
-
-# Check, back up and restore the index.
 ./build/bin/ledgerase-cli evidence check
 ./build/bin/ledgerase-cli evidence backup ./evidence-backup
 ./build/bin/ledgerase-cli evidence restore ./evidence-backup --db ./restored.db
 ```
 
-The index defaults to `/var/lib/ledgerase/ledgerase.db` for root and a per-user
-state directory otherwise. Set `LEDGERASE_DB` or pass `--db PATH` to choose
-another location. See `docs/EVIDENCE-DATABASE.md` for the schema, the search
-filters, the verification steps before export, and the backup manifest.
+The backup writes a SQLite copy (`ledgerase.db`), copies indexed artifacts it can read under `artifacts/`, and writes a `backup.json` manifest. A missing artifact or a copied hash that differs from the database record marks the backup incomplete. Restore requires a complete manifest, verifies each artifact copy against its manifest hash, and checks that the backup database exists. It then restores only the database file to the target path; artifact files are not restored, and their original paths remain in the database.
+
+The database defaults to `/var/lib/ledgerase/ledgerase.db` for root and a per-user state directory otherwise. Override it with `LEDGERASE_DB` or `--db PATH`. See `docs/EVIDENCE-DATABASE.md` for details.
